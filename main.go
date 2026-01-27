@@ -1,16 +1,20 @@
-// Package orca provides a Go SDK for integrating with the Orca gRPC service
+// Package orca provides the Go SDK for integrating with the Orca gRPC service
 // to register, execute, and manage algorithms. Algorithms can have dependencies
 // which are managed by Orca-core.
 package orca
 
 import (
 	"context"
+	"crypto/md5"
+	"crypto/tls"
 	"fmt"
-	"log"
 	"net"
 	"os"
 	"os/signal"
+	"reflect"
 	"regexp"
+	"runtime"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -22,137 +26,27 @@ import (
 	"google.golang.org/protobuf/types/known/structpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	pb "github.com/orc-analytics/core/protobufs/go"
+	pb "github.com/orca-telemetry/core/protobufs/go"
+
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 )
 
-// Validation patterns
 var (
+	// regex patterns for validation
 	algorithmNamePattern = regexp.MustCompile(`^[A-Z][a-zA-Z0-9]*$`)
 	semverPattern        = regexp.MustCompile(`^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$`)
 	windowNamePattern    = regexp.MustCompile(`^[A-Z][a-zA-Z0-9]*$`)
 )
 
-// MetadataField represents a field in window metadata
-type MetadataField struct {
-	Name        string
-	Description string
+func init() {
+	zerolog.TimeFieldFormat = zerolog.TimeFormatUnix
 }
-
-// Validate checks if the metadata field is valid
-func (m *MetadataField) Validate() error {
-	if m.Name == "" {
-		return fmt.Errorf("metadata field name cannot be empty")
-	}
-	if m.Description == "" {
-		return fmt.Errorf("metadata field description cannot be empty")
-	}
-	return nil
-}
-
-// WindowType defines the type of window that triggers algorithms
-type WindowType struct {
-	Name           string
-	Version        string
-	Description    string
-	MetadataFields []MetadataField
-}
-
-// Validate checks if the window type is valid
-func (w *WindowType) Validate() error {
-	if !windowNamePattern.MatchString(w.Name) {
-		return fmt.Errorf("window name '%s' must be in PascalCase", w.Name)
-	}
-	if !semverPattern.MatchString(w.Version) {
-		return fmt.Errorf("window version '%s' must follow semantic versioning (e.g., '1.0.0')", w.Version)
-	}
-
-	seen := make(map[string]bool)
-	for _, field := range w.MetadataFields {
-		if err := field.Validate(); err != nil {
-			return err
-		}
-		key := field.Name + field.Description
-		if seen[key] {
-			return fmt.Errorf("duplicate metadata field: name='%s', description='%s'", field.Name, field.Description)
-		}
-		seen[key] = true
-	}
-	return nil
-}
-
-// FullName returns the full window name as "name_version"
-func (w *WindowType) FullName() string {
-	return fmt.Sprintf("%s_%s", w.Name, w.Version)
-}
-
-// Window represents a time window with metadata
-type Window struct {
-	TimeFrom time.Time
-	TimeTo   time.Time
-	Name     string
-	Version  string
-	Origin   string
-	Metadata map[string]interface{}
-}
-
-// ExecutionParams contains the parameters passed to algorithm execution
-type ExecutionParams struct {
-	Window       Window
-	Dependencies map[string]interface{}
-}
-
-// Result types for algorithm returns
-type (
-	// StructResult represents a structured dictionary result
-	StructResult struct {
-		Value map[string]interface{}
-	}
-
-	// ValueResult represents a single numeric or boolean value
-	ValueResult struct {
-		Value interface{} // float64, int, or bool
-	}
-
-	// ArrayResult represents an array of numeric or boolean values
-	ArrayResult struct {
-		Value []interface{} // []float64, []int, or []bool
-	}
-
-	// NoneResult represents no result
-	NoneResult struct{}
-)
 
 // AlgorithmFunc is the signature for algorithm execution functions
-type AlgorithmFunc func(params ExecutionParams) (interface{}, error)
+type AlgorithmFunc func(params *ExecutionParams) (Result, error)
 
-// Algorithm represents a registered algorithm
-type Algorithm struct {
-	Name        string
-	Version     string
-	Description string
-	WindowType  WindowType
-	ExecFn      AlgorithmFunc
-	Processor   string
-	Runtime     string
-	ResultType  pb.ResultType
-	DependsOn   []string // Full names of dependencies
-}
-
-// FullName returns the algorithm's full name as "name_version"
-func (a *Algorithm) FullName() string {
-	return fmt.Sprintf("%s_%s", a.Name, a.Version)
-}
-
-// algorithmRegistry manages all registered algorithms
-type algorithmRegistry struct {
-	mu                 sync.RWMutex
-	algorithms         map[string]*Algorithm
-	windowTriggers     map[string][]*Algorithm
-	dependencies       map[string][]string
-	remoteDependencies map[string][]RemoteAlgorithm
-}
-
-// RemoteAlgorithm represents a dependency on a remote algorithm
+// RemoteAlgorithm represents an algorithm from another processor
 type RemoteAlgorithm struct {
 	ProcessorName    string
 	ProcessorRuntime string
@@ -160,67 +54,175 @@ type RemoteAlgorithm struct {
 	Version          string
 }
 
+// FullName returns the full algorithm name
+func (r RemoteAlgorithm) FullName() string {
+	return fmt.Sprintf("%s_%s", r.Name, r.Version)
+}
+
+// Algorithm represents a registered algorithm
+type Algorithm struct {
+	Name        string
+	Version     string
+	Description string
+	WindowType  WindowType
+	ExecFunc    AlgorithmFunc
+	Processor   string
+	Runtime     string
+	ResultType  pb.ResultType
+	LookbackN   int
+	LookbackTD  time.Duration
+}
+
+// FullName returns the full algorithm name as "name_version"
+func (a Algorithm) FullName() string {
+	return fmt.Sprintf("%s_%s", a.Name, a.Version)
+}
+
+// ID returns the globally unique identifier
+func (a Algorithm) ID() string {
+	hash := md5.Sum([]byte(a.Runtime))
+	return fmt.Sprintf("%s_%s_%x", a.Name, a.Version, hash)
+}
+
+// FullWindowName returns the full window name
+func (a Algorithm) FullWindowName() string {
+	return a.WindowType.FullName()
+}
+
+// algorithmRegistry manages all registered algorithms
+type algorithmRegistry struct {
+	mu                 sync.RWMutex
+	algorithms         map[string]*Algorithm
+	dependencies       map[string][]*Algorithm
+	dependencyFuncs    map[string][]AlgorithmFunc
+	remoteDependencies map[string][]RemoteAlgorithm
+	windowTriggers     map[string][]*Algorithm
+	lookbacks          map[string]map[string]lookbackParams
+}
+
+type lookbackParams struct {
+	N  int
+	TD time.Duration
+}
+
 func newAlgorithmRegistry() *algorithmRegistry {
 	return &algorithmRegistry{
 		algorithms:         make(map[string]*Algorithm),
-		windowTriggers:     make(map[string][]*Algorithm),
-		dependencies:       make(map[string][]string),
+		dependencies:       make(map[string][]*Algorithm),
+		dependencyFuncs:    make(map[string][]AlgorithmFunc),
 		remoteDependencies: make(map[string][]RemoteAlgorithm),
+		windowTriggers:     make(map[string][]*Algorithm),
+		lookbacks:          make(map[string]map[string]lookbackParams),
 	}
 }
 
-func (r *algorithmRegistry) add(algo *Algorithm) error {
+func (r *algorithmRegistry) addAlgorithm(name string, algo *Algorithm) error {
 	r.mu.Lock()
+
 	defer r.mu.Unlock()
 
-	if _, exists := r.algorithms[algo.FullName()]; exists {
-		return fmt.Errorf("algorithm %s already registered", algo.FullName())
+	if _, exists := r.algorithms[name]; exists {
+		return fmt.Errorf("algorithm %s already exists", name)
 	}
+	log.Info().Msg(fmt.Sprintf("Registering algorithm: %s (window: %s)", name, algo.FullWindowName()))
 
-	r.algorithms[algo.FullName()] = algo
+	r.algorithms[name] = algo
 
-	windowKey := algo.WindowType.FullName()
-	r.windowTriggers[windowKey] = append(r.windowTriggers[windowKey], algo)
-
-	log.Printf("Registered algorithm: %s (window: %s)", algo.FullName(), windowKey)
 	return nil
 }
 
-func (r *algorithmRegistry) get(fullName string) (*Algorithm, bool) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	algo, exists := r.algorithms[fullName]
-	return algo, exists
-}
+func (r *algorithmRegistry) addDependency(algoName string, dep AlgorithmFunc, remote bool) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 
-func (r *algorithmRegistry) all() []*Algorithm {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
+	if remote {
+		// handle remote dependency
+		remoteMeta := extractRemoteAlgorithmMeta(dep)
+		if remoteMeta == nil {
+			return BrokenRemoteAlgorithmStubsError{"could not parse metadata from Orca stubs. Rerun stub generation: `orca sync`"}
+		}
 
-	algos := make([]*Algorithm, 0, len(r.algorithms))
-	for _, algo := range r.algorithms {
-		algos = append(algos, algo)
+		r.remoteDependencies[algoName] = append(r.remoteDependencies[algoName], *remoteMeta)
+		r.addLookbackLocked(algoName, remoteMeta.FullName(), extractLookback(dep))
+		return nil
 	}
-	return algos
+
+	// Find the dependency algorithm
+	var depAlgo *Algorithm
+	for _, algo := range r.algorithms {
+		if isSameFunc(algo.ExecFunc, dep) {
+			depAlgo = algo
+			break
+		}
+	}
+	if depAlgo == nil {
+		return fmt.Errorf("dependency not found")
+	}
+
+	r.dependencyFuncs[algoName] = append(r.dependencyFuncs[algoName], dep)
+	r.dependencies[algoName] = append(r.dependencies[algoName], depAlgo)
+	r.addLookbackLocked(algoName, depAlgo.FullName(), extractLookback(dep))
+
+	return nil
 }
 
-// Processor is the main entry point for the Orca SDK
+func (r *algorithmRegistry) addWindowTrigger(windowName string, algo *Algorithm) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.windowTriggers[windowName] = append(r.windowTriggers[windowName], algo)
+}
+
+func (r *algorithmRegistry) hasAlgorithmFunc(fn AlgorithmFunc) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	for _, algo := range r.algorithms {
+		if isSameFunc(algo.ExecFunc, fn) {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *algorithmRegistry) addLookbackLocked(from, to string, params lookbackParams) {
+	if r.lookbacks[from] == nil {
+		r.lookbacks[from] = make(map[string]lookbackParams)
+	}
+	r.lookbacks[from][to] = params
+}
+
+func (r *algorithmRegistry) getLookback(from, to string) lookbackParams {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	if toMap, exists := r.lookbacks[from]; exists {
+		if params, exists := toMap[to]; exists {
+			return params
+		}
+	}
+	return lookbackParams{N: 0, TD: 0}
+}
+
+// Processor is the main gRPC processor for algorithm registration and execution
 type Processor struct {
+	pb.UnimplementedOrcaProcessorServer
+
 	name                  string
+	processorConnStr      string
+	orcaProcessorConnStr  string
 	runtime               string
 	maxWorkers            int
-	processorPort         string
-	processorExternalPort string
-	processorHost         string
-	orcaCore              string
-	projectName           string
-	isProduction          bool
 	registry              *algorithmRegistry
-
-	pb.UnimplementedOrcaProcessorServer
+	orcaCore              string
+	isProduction          bool
+	projectName           string
+	processorPort         string
+	processorHost         string
+	processorExternalPort string
 }
 
-// ProcessorOption is a functional option for configuring a Processor
+// ProcessorOption configures a Processor
 type ProcessorOption func(*Processor)
 
 // WithMaxWorkers sets the maximum number of concurrent workers
@@ -230,10 +232,45 @@ func WithMaxWorkers(n int) ProcessorOption {
 	}
 }
 
-// WithProjectName sets the project name for this processor
+// WithOrcaCore sets the Orca Core connection string
+func WithOrcaCore(addr string) ProcessorOption {
+	return func(p *Processor) {
+		p.orcaCore = addr
+	}
+}
+
+// WithProduction enables production mode (TLS)
+func WithProduction(enabled bool) ProcessorOption {
+	return func(p *Processor) {
+		p.isProduction = enabled
+	}
+}
+
+// WithProjectName sets the project name
 func WithProjectName(name string) ProcessorOption {
 	return func(p *Processor) {
 		p.projectName = name
+	}
+}
+
+// WithProcessorPort sets the processor port
+func WithProcessorPort(port string) ProcessorOption {
+	return func(p *Processor) {
+		p.processorPort = port
+	}
+}
+
+// WithProcessorHost sets the processor host
+func WithProcessorHost(host string) ProcessorOption {
+	return func(p *Processor) {
+		p.processorHost = host
+	}
+}
+
+// WithProcessorExternalPort sets the processor external port
+func WithProcessorExternalPort(port string) ProcessorOption {
+	return func(p *Processor) {
+		p.processorExternalPort = port
 	}
 }
 
@@ -241,358 +278,243 @@ func WithProjectName(name string) ProcessorOption {
 func NewProcessor(name string, opts ...ProcessorOption) *Processor {
 	p := &Processor{
 		name:                  name,
-		runtime:               fmt.Sprintf("go %s", os.Getenv("GO_VERSION")),
+		runtime:               runtime.Version(),
 		maxWorkers:            10,
-		processorPort:         getEnv("PROCESSOR_PORT", "50051"),
-		processorExternalPort: getEnv("PROCESSOR_EXTERNAL_PORT", "50051"),
-		processorHost:         getEnv("PROCESSOR_HOST", "localhost"),
-		orcaCore:              getEnv("ORCA_CORE", "localhost:50050"),
-		projectName:           getEnv("PROJECT_NAME", ""),
-		isProduction:          getEnv("ENVIRONMENT", "development") == "production",
 		registry:              newAlgorithmRegistry(),
+		orcaCore:              getEnv("ORCA_CORE", "localhost:50051"),
+		isProduction:          getEnv("ORCA_ENV", "development") == "production",
+		projectName:           getEnv("PROJECT_NAME", ""),
+		processorPort:         getEnv("PROCESSOR_PORT", "50052"),
+		processorHost:         getEnv("PROCESSOR_HOST", "localhost"),
+		processorExternalPort: getEnv("PROCESSOR_EXTERNAL_PORT", "50052"),
 	}
 
 	for _, opt := range opts {
 		opt(p)
 	}
 
+	p.processorConnStr = fmt.Sprintf(":%s", p.processorPort)
+	p.orcaProcessorConnStr = fmt.Sprintf("%s:%s", p.processorHost, p.processorExternalPort)
+
 	return p
 }
 
-// AlgorithmConfig contains configuration for registering an algorithm
-type AlgorithmConfig struct {
-	Name        string
-	Version     string
-	WindowType  WindowType
-	Description string
-	DependsOn   []string // Full names of dependencies
-}
-
-// Algorithm registers a new algorithm with the processor
-func (p *Processor) Algorithm(config AlgorithmConfig, fn AlgorithmFunc) error {
-	// Validate algorithm name
-	if !algorithmNamePattern.MatchString(config.Name) {
-		return fmt.Errorf("algorithm name '%s' must be in PascalCase", config.Name)
+// Algorithm registers an algorithm with the processor
+func (p *Processor) Algorithm(name, version string, windowType WindowType, description string, dependsOn []AlgorithmFunc, execFunc AlgorithmFunc) error {
+	if !algorithmNamePattern.MatchString(name) {
+		return InvalidAlgorithmArgumentError{fmt.Sprintf("algorithm name '%s' must be in PascalCase", name)}
+	}
+	if !semverPattern.MatchString(version) {
+		return InvalidAlgorithmArgumentError{fmt.Sprintf("version '%s' must follow basic semantic versioning", version)}
+	}
+	if err := windowType.Validate(); err != nil {
+		return err
 	}
 
-	// Validate version
-	if !semverPattern.MatchString(config.Version) {
-		return fmt.Errorf("version '%s' must follow semantic versioning (e.g., '1.0.0')", config.Version)
+	resultType := inferResultType(execFunc)
+	if resultType == pb.ResultType_NOT_SPECIFIED {
+		return InvalidAlgorithmReturnTypeError{"cannot infer result type from algorithm function"}
 	}
-
-	// Validate window type
-	if err := config.WindowType.Validate(); err != nil {
-		return fmt.Errorf("invalid window type: %w", err)
-	}
-
-	// Determine result type (this would need runtime type inspection in production)
-	// For now, we'll default to STRUCT
-	resultType := pb.ResultType_STRUCT
 
 	algo := &Algorithm{
-		Name:        config.Name,
-		Version:     config.Version,
-		Description: config.Description,
-		WindowType:  config.WindowType,
-		ExecFn:      fn,
+		Name:        name,
+		Version:     version,
+		Description: description,
+		WindowType:  windowType,
+		ExecFunc:    execFunc,
 		Processor:   p.name,
 		Runtime:     p.runtime,
 		ResultType:  resultType,
-		DependsOn:   config.DependsOn,
 	}
 
-	return p.registry.add(algo)
+	fullName := algo.FullName()
+	if err := p.registry.addAlgorithm(fullName, algo); err != nil {
+		return err
+	}
+
+	p.registry.addWindowTrigger(algo.FullWindowName(), algo)
+
+	for _, dep := range dependsOn {
+		isRemote := isRemoteAlgorithm(dep)
+		if !isRemote && !p.registry.hasAlgorithmFunc(dep) {
+			return InvalidDependencyError{"dependency must be registered before use"}
+		}
+		if err := p.registry.addDependency(fullName, dep, isRemote); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
-// Register registers this processor and all its algorithms with Orca Core
-func (p *Processor) Register(ctx context.Context) error {
-	log.Printf("Preparing to register processor '%s' with Orca Core", p.name)
+// ExecuteDagPart implements the gRPC method
+func (p *Processor) ExecuteDagPart(req *pb.ExecutionRequest, stream pb.OrcaProcessor_ExecuteDagPartServer) error {
+	log.Info().Msg(fmt.Sprintf("Received DAG execution request with %d algorithms and ExecId: %s",
+		len(req.AlgorithmExecutions), req.ExecId))
 
-	req := &pb.ProcessorRegistration{
-		Name:          p.name,
-		Runtime:       p.runtime,
-		ConnectionStr: fmt.Sprintf("%s:%s", p.processorHost, p.processorExternalPort),
-		ProjectName:   p.projectName,
+	// ctx := stream.Context()
+	// FIXME: Feed back in to the algorithm
+	results := make(chan *pb.ExecutionResult, len(req.AlgorithmExecutions))
+	var wg sync.WaitGroup
+
+	for _, algoExec := range req.AlgorithmExecutions {
+		wg.Add(1)
+		go func(exec *pb.ExecuteAlgorithm) {
+			defer wg.Done()
+			result := p.executeAlgorithm(req.ExecId, exec.Algorithm, req.Window, exec.Dependencies)
+			results <- result
+		}(algoExec)
 	}
 
-	// Add all algorithms
-	for _, algo := range p.registry.all() {
-		algoPb := &pb.Algorithm{
-			Name:        algo.Name,
-			Version:     algo.Version,
-			Description: algo.Description,
-			ResultType:  algo.ResultType,
-			WindowType: &pb.WindowType{
-				Name:        algo.WindowType.Name,
-				Version:     algo.WindowType.Version,
-				Description: algo.WindowType.Description,
-			},
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	for result := range results {
+		if err := stream.Send(result); err != nil {
+			log.Error().Err(err).Msg("Failed to send result")
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (p *Processor) executeAlgorithm(execID string, algorithm *pb.Algorithm, window *pb.Window, dependencies []*pb.AlgorithmDependencyResult) *pb.ExecutionResult {
+	log.Debug().Str("name", algorithm.Name).Str("version", algorithm.Version).Msg("Processing algorithm: %s_%s")
+
+	algoName := fmt.Sprintf("%s_%s", algorithm.Name, algorithm.Version)
+	p.registry.mu.RLock()
+	algo, exists := p.registry.algorithms[algoName]
+	p.registry.mu.RUnlock()
+
+	if !exists {
+		return p.createErrorResult(execID, algorithm, fmt.Errorf("algorithm not found: %s", algoName))
+	}
+
+	// Build dependencies
+	deps := NewDependencies()
+	for _, depResult := range dependencies {
+		depAlgo := DependencyAlgorithm{
+			Name:        depResult.Algorithm.Name,
+			Version:     depResult.Algorithm.Version,
+			Description: depResult.Algorithm.Description,
 		}
 
-		// Add metadata fields
-		for _, field := range algo.WindowType.MetadataFields {
-			algoPb.WindowType.MetadataFields = append(algoPb.WindowType.MetadataFields, &pb.MetadataField{
-				Name:        field.Name,
-				Description: field.Description,
+		var rows []DependencyResultRow
+		for _, res := range depResult.Result {
+			var value any
+			switch v := res.Result.ResultData.(type) {
+			case *pb.Result_SingleValue:
+				value = v.SingleValue
+			case *pb.Result_FloatValues:
+				vals := make([]any, len(v.FloatValues.Values))
+				for i, f := range v.FloatValues.Values {
+					vals[i] = f
+				}
+				value = vals
+			case *pb.Result_StructValue:
+				value = v.StructValue.AsMap()
+			}
+
+			rows = append(rows, DependencyResultRow{
+				Result: value,
+				Window: Window{
+					TimeFrom: res.Window.TimeFrom.AsTime(),
+					TimeTo:   res.Window.TimeTo.AsTime(),
+					Name:     res.Window.WindowTypeName,
+					Version:  res.Window.WindowTypeVersion,
+					Origin:   res.Window.Origin,
+				},
 			})
 		}
 
-		// Add dependencies
-		for _, depName := range algo.DependsOn {
-			if dep, ok := p.registry.get(depName); ok {
-				algoPb.Dependencies = append(algoPb.Dependencies, &pb.AlgorithmDependency{
-					Name:             dep.Name,
-					Version:          dep.Version,
-					ProcessorName:    dep.Processor,
-					ProcessorRuntime: dep.Runtime,
-				})
-			}
+		depRes := &DependencyResult{
+			Algorithm: depAlgo,
+			Results:   rows,
 		}
-
-		req.SupportedAlgorithms = append(req.SupportedAlgorithms, algoPb)
+		deps.deps[depAlgo.ID()] = depRes
 	}
 
-	// Connect to Orca Core
-	conn, err := p.connect(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to connect to Orca Core: %w", err)
-	}
-	defer conn.Close()
-
-	client := pb.NewOrcaCoreClient(conn)
-	resp, err := client.RegisterProcessor(ctx, req)
-	if err != nil {
-		return fmt.Errorf("failed to register processor: %w", err)
-	}
-
-	log.Printf("Algorithm registration response received: %v", resp)
-	return nil
-}
-
-// Start starts the gRPC server and begins serving algorithm requests
-func (p *Processor) Start(ctx context.Context) error {
-	log.Printf("Starting Orca Processor '%s' with %s", p.name, p.runtime)
-	log.Printf("Initializing gRPC server with %d workers", p.maxWorkers)
-
-	lis, err := net.Listen("tcp", fmt.Sprintf(":%s", p.processorPort))
-	if err != nil {
-		return fmt.Errorf("failed to listen: %w", err)
-	}
-
-	grpcServer := grpc.NewServer(
-		grpc.MaxRecvMsgSize(50*1024*1024), // 50MB
-		grpc.MaxSendMsgSize(50*1024*1024), // 50MB
-	)
-
-	pb.RegisterOrcaProcessorServer(grpcServer, p)
-	reflection.Register(grpcServer)
-
-	log.Printf("Server listening on :%s", p.processorPort)
-
-	// Setup graceful shutdown
-	go func() {
-		sigCh := make(chan os.Signal, 1)
-		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-		<-sigCh
-		log.Println("Received shutdown signal, stopping server...")
-		grpcServer.GracefulStop()
-	}()
-
-	log.Println("Server is ready for requests")
-	return grpcServer.Serve(lis)
-}
-
-// ExecuteDagPart implements the gRPC method for executing part of a DAG
-func (p *Processor) ExecuteDagPart(req *pb.ExecutionRequest, stream pb.OrcaProcessor_ExecuteDagPartServer) error {
-	log.Printf("Received DAG execution request with %d algorithms (ExecId: %s)",
-		len(req.Algorithms), req.ExecId)
-
-	ctx := stream.Context()
-
-	// Create a wait group and result channel
-	var wg sync.WaitGroup
-	resultCh := make(chan *pb.ExecutionResult, len(req.Algorithms))
-
-	// Execute all algorithms concurrently
-	for _, algo := range req.Algorithms {
-		wg.Add(1)
-		go func(algorithm *pb.Algorithm) {
-			defer wg.Done()
-			result := p.executeAlgorithm(ctx, req.ExecId, algorithm, req)
-			resultCh <- result
-		}(algo)
-	}
-
-	// Close result channel when all goroutines complete
-	go func() {
-		wg.Wait()
-		close(resultCh)
-	}()
-
-	// Stream results as they complete
-	for result := range resultCh {
-		if err := stream.Send(result); err != nil {
-			return fmt.Errorf("failed to send result: %w", err)
-		}
-	}
-
-	return nil
-}
-
-// executeAlgorithm executes a single algorithm
-func (p *Processor) executeAlgorithm(ctx context.Context, execID string, algoPb *pb.Algorithm, req *pb.ExecutionRequest) *pb.ExecutionResult {
-	algoName := fmt.Sprintf("%s_%s", algoPb.Name, algoPb.Version)
-
-	algo, ok := p.registry.get(algoName)
-	if !ok {
-		return p.createErrorResult(execID, algoPb, fmt.Errorf("algorithm not found: %s", algoName))
-	}
-
-	// Build execution params
-	params := ExecutionParams{
-		Window: Window{
-			TimeFrom: req.Window.TimeFrom.AsTime(),
-			TimeTo:   req.Window.TimeTo.AsTime(),
-			Name:     req.Window.WindowTypeName,
-			Version:  req.Window.WindowTypeVersion,
-			Origin:   req.Window.Origin,
-			Metadata: make(map[string]interface{}),
-		},
-		Dependencies: make(map[string]interface{}),
-	}
-
-	// Parse window metadata
-	if req.Window.Metadata != nil {
-		params.Window.Metadata = req.Window.Metadata.AsMap()
-	}
-
-	// Parse dependencies
-	for _, depResult := range req.AlgorithmResults {
-		depName := fmt.Sprintf("%s_%s", depResult.Algorithm.Name, depResult.Algorithm.Version)
-
-		switch v := depResult.Result.Result.(type) {
-		case *pb.Result_SingleValue:
-			params.Dependencies[depName] = v.SingleValue
-		case *pb.Result_FloatValues:
-			params.Dependencies[depName] = v.FloatValues.Values
-		case *pb.Result_StructValue:
-			params.Dependencies[depName] = v.StructValue.AsMap()
-		}
-	}
+	params := NewExecutionParams(window, deps)
 
 	// Execute algorithm
-	result, err := algo.ExecFn(params)
+	result, err := algo.ExecFunc(params)
 	if err != nil {
-		return p.createErrorResult(execID, algoPb, err)
+		return p.createErrorResult(execID, algorithm, err)
 	}
 
-	// Convert result to protobuf
-	resultPb, err := p.convertResult(result, algo.ResultType)
-	if err != nil {
-		return p.createErrorResult(execID, algoPb, err)
-	}
-
-	log.Printf("Completed algorithm: %s", algoPb.Name)
-
-	return &pb.ExecutionResult{
-		ExecId: execID,
-		AlgorithmResult: &pb.AlgorithmResult{
-			Algorithm: algoPb,
-			Result:    resultPb,
-		},
-	}
+	return p.createSuccessResult(execID, algorithm, result)
 }
 
-// convertResult converts a Go result to a protobuf Result
-func (p *Processor) convertResult(result interface{}, resultType pb.ResultType) (*pb.Result, error) {
-	switch v := result.(type) {
-	case StructResult:
-		structPb, err := structpb.NewStruct(v.Value)
-		if err != nil {
-			return nil, fmt.Errorf("failed to convert struct result: %w", err)
-		}
-		return &pb.Result{
-			Status: pb.ResultStatus_RESULT_STATUS_SUCEEDED,
-			Result: &pb.Result_StructValue{StructValue: structPb},
-		}, nil
+func (p *Processor) createErrorResult(execID string, algorithm *pb.Algorithm, err error) *pb.ExecutionResult {
+	log.Error().Err(err).Str("name", algorithm.Name).Msg("Algorithm %s failed")
 
-	case ValueResult:
-		var floatVal float64
-		switch val := v.Value.(type) {
-		case float64:
-			floatVal = val
-		case int:
-			floatVal = float64(val)
-		case bool:
-			if val {
-				floatVal = 1.0
-			} else {
-				floatVal = 0.0
-			}
-		default:
-			return nil, fmt.Errorf("unsupported value type: %T", val)
-		}
-		return &pb.Result{
-			Status: pb.ResultStatus_RESULT_STATUS_SUCEEDED,
-			Result: &pb.Result_SingleValue{SingleValue: floatVal},
-		}, nil
-
-	case ArrayResult:
-		floats := make([]float64, len(v.Value))
-		for i, val := range v.Value {
-			switch val := val.(type) {
-			case float64:
-				floats[i] = val
-			case int:
-				floats[i] = float64(val)
-			case bool:
-				if val {
-					floats[i] = 1.0
-				} else {
-					floats[i] = 0.0
-				}
-			default:
-				return nil, fmt.Errorf("unsupported array element type: %T", val)
-			}
-		}
-		return &pb.Result{
-			Status: pb.ResultStatus_RESULT_STATUS_SUCEEDED,
-			Result: &pb.Result_FloatValues{FloatValues: &pb.FloatArray{Values: floats}},
-		}, nil
-
-	case NoneResult:
-		return &pb.Result{
-			Status: pb.ResultStatus_RESULT_STATUS_SUCEEDED,
-		}, nil
-
-	default:
-		return nil, fmt.Errorf("unsupported result type: %T", result)
-	}
-}
-
-// createErrorResult creates an error execution result
-func (p *Processor) createErrorResult(execID string, algo *pb.Algorithm, err error) *pb.ExecutionResult {
-	log.Printf("Algorithm %s failed: %v", algo.Name, err)
-
-	errorStruct, _ := structpb.NewStruct(map[string]interface{}{
+	errorStruct, _ := structpb.NewStruct(map[string]any{
 		"error": err.Error(),
 	})
+	errorStructPb := pb.Result_StructValue{
+		StructValue: errorStruct,
+	}
 
 	return &pb.ExecutionResult{
 		ExecId: execID,
 		AlgorithmResult: &pb.AlgorithmResult{
-			Algorithm: algo,
+			Algorithm: algorithm,
 			Result: &pb.Result{
-				Status:    pb.ResultStatus_RESULT_STATUS_UNHANDLED_FAILED,
-				Timestamp: time.Now().Unix(),
-				Result:    &pb.Result_StructValue{StructValue: errorStruct},
+				Status:     pb.ResultStatus_RESULT_STATUS_UNHANDLED_FAILED,
+				ResultData: &errorStructPb,
+				Timestamp:  time.Now().Unix(),
 			},
 		},
 	}
 }
 
-// HealthCheck implements the health check gRPC method
+func (p *Processor) createSuccessResult(execID string, algorithm *pb.Algorithm, result Result) *pb.ExecutionResult {
+	pbResult := &pb.Result{
+		Status:    pb.ResultStatus_RESULT_STATUS_SUCEEDED,
+		Timestamp: time.Now().Unix(),
+	}
+
+	switch r := result.(type) {
+	case StructResult:
+		structVal, _ := structpb.NewStruct(r.Value)
+		pbResult.ResultData = &pb.Result_StructValue{StructValue: structVal}
+	case ValueResult:
+		if f, ok := r.Value.(Float64Value); ok {
+			pbResult.ResultData = &pb.Result_SingleValue{SingleValue: float32(f)}
+		} else if i, ok := r.Value.(IntValue); ok {
+			pbResult.ResultData = &pb.Result_SingleValue{SingleValue: float32(i)}
+		}
+	case ArrayResult:
+		if f, ok := r.Value.(Float64Array); ok {
+			floats := make([]float32, len(f))
+			for i, v := range f {
+				floats[i] = float32(v)
+			}
+			pbResult.ResultData = &pb.Result_FloatValues{FloatValues: &pb.FloatArray{Values: floats}}
+		} else if i, ok := r.Value.(IntArray); ok {
+			floats := make([]float32, len(i))
+			for ii, v := range i {
+				floats[ii] = float32(v)
+			}
+			pbResult.ResultData = &pb.Result_FloatValues{FloatValues: &pb.FloatArray{Values: floats}}
+		}
+	}
+
+	return &pb.ExecutionResult{
+		ExecId: execID,
+		AlgorithmResult: &pb.AlgorithmResult{
+			Algorithm: algorithm,
+			Result:    pbResult,
+		},
+	}
+}
+
+// HealthCheck implements the gRPC method
 func (p *Processor) HealthCheck(ctx context.Context, req *pb.HealthCheckRequest) (*pb.HealthCheckResponse, error) {
+	log.Debug().Msg("Received health check request")
 	return &pb.HealthCheckResponse{
 		Status:  pb.HealthCheckResponse_STATUS_SERVING,
 		Message: "Processor is healthy",
@@ -605,73 +527,274 @@ func (p *Processor) HealthCheck(ctx context.Context, req *pb.HealthCheckRequest)
 	}, nil
 }
 
-// connect creates a connection to Orca Core
-func (p *Processor) connect(ctx context.Context) (*grpc.ClientConn, error) {
-	var opts []grpc.DialOption
+// Register registers the processor with Orca Core
+func (p *Processor) Register(ctx context.Context) error {
+	log.Info().Str("name", p.name).Msg("Preparing to register processor '%s' with Orca Core")
+
+	req := &pb.ProcessorRegistration{
+		Name:          p.name,
+		Runtime:       p.runtime,
+		ConnectionStr: p.orcaProcessorConnStr,
+	}
+
+	if p.projectName != "" {
+		req.ProjectName = p.projectName
+	}
+
+	p.registry.mu.RLock()
+	for _, algo := range p.registry.algorithms {
+		algoMsg := &pb.Algorithm{
+			Name:        algo.Name,
+			Version:     algo.Version,
+			Description: algo.Description,
+			ResultType:  algo.ResultType,
+			WindowType: &pb.WindowType{
+				Name:        algo.WindowType.Name,
+				Version:     algo.WindowType.Version,
+				Description: algo.WindowType.Description,
+			},
+		}
+
+		for _, field := range algo.WindowType.MetadataFields {
+			algoMsg.WindowType.MetadataFields = append(algoMsg.WindowType.MetadataFields, &pb.MetadataField{
+				Name:        field.Name,
+				Description: field.Description,
+			})
+		}
+
+		// Add dependencies
+		if deps, exists := p.registry.dependencies[algo.FullName()]; exists {
+			for _, dep := range deps {
+				lookback := p.registry.getLookback(algo.FullName(), dep.FullName())
+				depMsg := &pb.AlgorithmDependency{
+					Name:             dep.Name,
+					Version:          dep.Version,
+					ProcessorName:    dep.Processor,
+					ProcessorRuntime: dep.Runtime,
+				}
+				if lookback.N > 0 {
+					depMsg.Lookback = &pb.AlgorithmDependency_LookbackNum{LookbackNum: uint32(lookback.N)}
+				} else if lookback.TD > 0 {
+					depMsg.Lookback = &pb.AlgorithmDependency_LookbackTimeDelta{LookbackTimeDelta: uint64(lookback.TD.Nanoseconds())}
+				}
+				algoMsg.Dependencies = append(algoMsg.Dependencies, depMsg)
+			}
+		}
+
+		// Add remote dependencies
+		if remoteDeps, exists := p.registry.remoteDependencies[algo.FullName()]; exists {
+			for _, remoteDep := range remoteDeps {
+				lookback := p.registry.getLookback(algo.FullName(), remoteDep.FullName())
+				depMsg := &pb.AlgorithmDependency{
+					Name:             remoteDep.Name,
+					Version:          remoteDep.Version,
+					ProcessorName:    remoteDep.ProcessorName,
+					ProcessorRuntime: remoteDep.ProcessorRuntime,
+				}
+				if lookback.N > 0 {
+					depMsg.Lookback = &pb.AlgorithmDependency_LookbackNum{LookbackNum: uint32(lookback.N)}
+				} else if lookback.TD > 0 {
+					depMsg.Lookback = &pb.AlgorithmDependency_LookbackTimeDelta{LookbackTimeDelta: uint64(lookback.TD.Nanoseconds())}
+				}
+				algoMsg.Dependencies = append(algoMsg.Dependencies, depMsg)
+			}
+		}
+
+		req.SupportedAlgorithms = append(req.SupportedAlgorithms, algoMsg)
+	}
+	p.registry.mu.RUnlock()
+
+	var conn *grpc.ClientConn
+	var err error
 
 	if p.isProduction {
-		creds := credentials.NewTLS(nil)
-		opts = append(opts, grpc.WithTransportCredentials(creds))
+		creds := credentials.NewTLS(&tls.Config{})
+		conn, err = grpc.NewClient(p.orcaCore, grpc.WithTransportCredentials(creds))
 	} else {
-		opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		conn, err = grpc.NewClient(p.orcaCore, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	}
 
-	return grpc.DialContext(ctx, p.orcaCore, opts...)
-}
-
-// EmitWindow emits a window to Orca Core
-func EmitWindow(ctx context.Context, window Window) error {
-	log.Printf("Emitting window: %+v", window)
-
-	// Get environment configuration
-	orcaCore := getEnv("ORCA_CORE", "localhost:50050")
-	isProduction := getEnv("ENVIRONMENT", "development") == "production"
-
-	// Connect to Orca Core
-	var opts []grpc.DialOption
-	if isProduction {
-		creds := credentials.NewTLS(nil)
-		opts = append(opts, grpc.WithTransportCredentials(creds))
-	} else {
-		opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
-	}
-
-	conn, err := grpc.DialContext(ctx, orcaCore, opts...)
 	if err != nil {
 		return fmt.Errorf("failed to connect to Orca Core: %w", err)
 	}
 	defer conn.Close()
 
-	// Create window protobuf
-	metadata, err := structpb.NewStruct(window.Metadata)
+	client := pb.NewOrcaCoreClient(conn)
+	resp, err := client.RegisterProcessor(ctx, req)
 	if err != nil {
-		return fmt.Errorf("failed to convert metadata: %w", err)
+		return fmt.Errorf("registration failed: %w", err)
 	}
 
-	windowPb := &pb.Window{
+	log.Info().Str("response", resp.GetMessage()).Msg("algorithm registration response")
+	return nil
+}
+
+// Start starts the gRPC server
+func (p *Processor) Start() error {
+	log.Info().Str("name", p.name).Str("runtime", p.runtime).Msg("starting Orca Processor")
+	log.Info().Int("maxWorkers", p.maxWorkers).Msg("initialising gRPC server")
+	lis, err := net.Listen("tcp", p.processorConnStr)
+	if err != nil {
+		return fmt.Errorf("failed to listen: %w", err)
+	}
+
+	grpcServer := grpc.NewServer(
+		grpc.MaxRecvMsgSize(50*1024*1024),
+		grpc.MaxSendMsgSize(50*1024*1024),
+	)
+
+	pb.RegisterOrcaProcessorServer(grpcServer, p)
+	reflection.Register(grpcServer)
+
+	log.Info().Str("processorConnStr", p.processorConnStr).Msg("server listening")
+
+	// Handle graceful shutdown
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGTERM, syscall.SIGINT)
+
+	go func() {
+		<-sigChan
+		log.Info().Msg("recieved shutdown signal, stopping server...")
+		grpcServer.GracefulStop()
+	}()
+
+	log.Info().Msg("server is ready for requests")
+	if err := grpcServer.Serve(lis); err != nil {
+		return fmt.Errorf("server failed: %w", err)
+	}
+
+	log.Info().Msg("Server shutdown complete")
+	return nil
+}
+
+// EmitWindow emits a window to Orca-core
+func EmitWindow(ctx context.Context, window Window, orcaCore string, isProduction bool) error {
+	log.Info().Object("window", window).Msg("Emitting window")
+
+	pbWindow := &pb.Window{
 		TimeFrom:          timestamppb.New(window.TimeFrom),
 		TimeTo:            timestamppb.New(window.TimeTo),
 		WindowTypeName:    window.Name,
 		WindowTypeVersion: window.Version,
 		Origin:            window.Origin,
-		Metadata:          metadata,
 	}
 
-	// Emit window
+	if len(window.Metadata) > 0 {
+		metadata, err := structpb.NewStruct(window.Metadata)
+		if err != nil {
+			return fmt.Errorf("failed to convert metadata: %w", err)
+		}
+		pbWindow.Metadata = metadata
+	}
+
+	var conn *grpc.ClientConn
+	var err error
+
+	if isProduction {
+		creds := credentials.NewTLS(&tls.Config{})
+		conn, err = grpc.NewClient(orcaCore, grpc.WithTransportCredentials(creds))
+	} else {
+		conn, err = grpc.NewClient(orcaCore, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	}
+
+	if err != nil {
+		return fmt.Errorf("failed to connect to Orca Core: %w", err)
+	}
+	defer conn.Close()
+
 	client := pb.NewOrcaCoreClient(conn)
-	resp, err := client.EmitWindow(ctx, windowPb)
+	resp, err := client.EmitWindow(ctx, pbWindow)
 	if err != nil {
 		return fmt.Errorf("failed to emit window: %w", err)
 	}
 
-	log.Printf("Window emitted: %v", resp)
+	log.Info().Str("response", resp.GetStatus().String()).Msg("window emitted")
 	return nil
 }
 
-// getEnv gets an environment variable with a default value
+// Helper functions
+
 func getEnv(key, defaultValue string) string {
 	if value := os.Getenv(key); value != "" {
 		return value
 	}
 	return defaultValue
+}
+
+func extractAlgorithmMeta(fn AlgorithmFunc) (name, version string) {
+	// In Go, we'd need to store metadata differently
+	// This is a placeholder - actual implementation would use reflection or metadata storage
+	return "", ""
+}
+
+func extractRemoteAlgorithmMeta(fn AlgorithmFunc) *RemoteAlgorithm {
+	// Placeholder for remote algorithm metadata extraction
+	return nil
+}
+
+func extractLookback(fn AlgorithmFunc) lookbackParams {
+	// Placeholder for lookback extraction
+	return lookbackParams{N: 0, TD: 0}
+}
+
+func isRemoteAlgorithm(fn AlgorithmFunc) bool {
+	// Placeholder for remote algorithm detection
+	return false
+}
+
+func isSameFunc(f1, f2 AlgorithmFunc) bool {
+	return reflect.ValueOf(f1).Pointer() == reflect.ValueOf(f2).Pointer()
+}
+
+func inferResultType(fn AlgorithmFunc) pb.ResultType {
+	fnType := reflect.TypeOf(fn)
+	if fnType.Kind() != reflect.Func {
+		return pb.ResultType_NOT_SPECIFIED
+	}
+
+	if fnType.NumOut() < 1 {
+		return pb.ResultType_NOT_SPECIFIED
+	}
+
+	returnType := fnType.Out(0)
+	typeName := returnType.String()
+
+	switch {
+	case strings.Contains(typeName, "StructResult"):
+		return pb.ResultType_STRUCT
+	case strings.Contains(typeName, "ValueResult"):
+		return pb.ResultType_VALUE
+	case strings.Contains(typeName, "ArrayResult"):
+		return pb.ResultType_ARRAY
+	case strings.Contains(typeName, "NoneResult"):
+		return pb.ResultType_NONE
+	default:
+		return pb.ResultType_NOT_SPECIFIED
+	}
+}
+
+// Lookback adds lookback metadata to an algorithm function
+type LookbackOption func(*lookbackParams)
+
+// WithLookbackN sets the number-based lookback
+func WithLookbackN(n int) LookbackOption {
+	return func(p *lookbackParams) {
+		p.N = n
+	}
+}
+
+// WithLookbackTD sets the time-based lookback
+func WithLookbackTD(td time.Duration) LookbackOption {
+	return func(p *lookbackParams) {
+		p.TD = td
+	}
+}
+
+// ApplyLookback applies lookback options (this would be used differently in Go)
+func ApplyLookback(opts ...LookbackOption) lookbackParams {
+	params := lookbackParams{}
+	for _, opt := range opts {
+		opt(&params)
+	}
+	return params
 }
