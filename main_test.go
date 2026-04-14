@@ -74,7 +74,7 @@ func setupOrca(ctx context.Context) (string, func()) {
 
 	orcaContainer, err := testcontainers.Run(
 		ctx,
-		"ghcr.io/orca-telemetry/core:0.12.0",
+		"ghcr.io/orca-telemetry/core:latest",
 		network.WithNetwork([]string{"orca-alias"}, nw),
 		testcontainers.WithEnv(map[string]string{
 			"ORCA_CONNECTION_STRING": orcaDbConnStr,

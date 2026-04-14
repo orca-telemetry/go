@@ -1,6 +1,5 @@
-// Package orca provides the Go SDK for integrating with the Orca gRPC service
-// to register, execute, and manage algorithms. Algorithms can have dependencies
-// which are managed by Orca-core.
+// Package Orca provides the Go SDK for integrating with the Orca stack
+// to register, execute, and manage algorithms
 package orca
 
 import (
@@ -204,7 +203,7 @@ func (r *algorithmRegistry) getLookback(from, to string) lookbackParams {
 	return lookbackParams{N: 0, TD: 0}
 }
 
-// Processor is the main gRPC processor for algorithm registration and execution
+// Processor is the entry point for registering algorithms in Orca
 type Processor struct {
 	pb.UnimplementedOrcaProcessorServer
 
@@ -299,8 +298,26 @@ func NewProcessor(name string, opts ...ProcessorOption) *Processor {
 	return p
 }
 
+type AlgorithmOptions struct {
+	DependsOn []AlgorithmFunc
+}
+type AlgorithmOption func(*AlgorithmOptions)
+
+func WithDependencies(dependencies []AlgorithmFunc) AlgorithmOption {
+	return func(o *AlgorithmOptions) {
+		o.DependsOn = dependencies
+	}
+}
+
 // Algorithm registers an algorithm with the processor
-func (p *Processor) Algorithm(name, version string, windowType WindowType, description string, dependsOn []AlgorithmFunc, execFunc AlgorithmFunc) error {
+func (p *Processor) Algorithm(
+	name string,
+	version string,
+	description string,
+	windowType WindowType,
+	execFunc AlgorithmFunc,
+	options ...AlgorithmOption,
+) error {
 	if !algorithmNamePattern.MatchString(name) {
 		return InvalidAlgorithmArgumentError{fmt.Sprintf("algorithm name '%s' must be in PascalCase", name)}
 	}
@@ -314,6 +331,11 @@ func (p *Processor) Algorithm(name, version string, windowType WindowType, descr
 	resultType := inferResultType(execFunc)
 	if resultType == pb.ResultType_NOT_SPECIFIED {
 		return InvalidAlgorithmReturnTypeError{"cannot infer result type from algorithm function"}
+	}
+
+	opts := &AlgorithmOptions{DependsOn: []AlgorithmFunc{}}
+	for _, option := range options {
+		option(opts)
 	}
 
 	algo := &Algorithm{
@@ -334,7 +356,7 @@ func (p *Processor) Algorithm(name, version string, windowType WindowType, descr
 
 	p.registry.addWindowTrigger(algo.FullWindowName(), algo)
 
-	for _, dep := range dependsOn {
+	for _, dep := range opts.DependsOn {
 		isRemote := isRemoteAlgorithm(dep)
 		if !isRemote && !p.registry.hasAlgorithmFunc(dep) {
 			return InvalidDependencyError{"dependency must be registered before use"}
