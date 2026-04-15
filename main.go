@@ -88,7 +88,8 @@ func (a Algorithm) FullWindowName() string {
 	return a.WindowType.FullName()
 }
 
-// algorithmRegistry manages all registered algorithms
+// algorithmRegistry keeps a local copy of all registered algorithms from
+// this processor
 type algorithmRegistry struct {
 	mu                 sync.RWMutex
 	algorithms         map[string]*Algorithm
@@ -300,12 +301,19 @@ func NewProcessor(name string, opts ...ProcessorOption) *Processor {
 	return p
 }
 
+// optionals
 type AlgorithmOptions struct {
-	DependsOn []AlgorithmFunc
+	DependsOn []Dependency
 }
+
 type AlgorithmOption func(*AlgorithmOptions)
 
-func WithDependencies(dependencies []AlgorithmFunc) AlgorithmOption {
+type Dependency struct {
+	Algorithm AlgorithmFunc
+	Lookback  LookbackOption
+}
+
+func WithDependencies(dependencies []Dependency) AlgorithmOption {
 	return func(o *AlgorithmOptions) {
 		o.DependsOn = dependencies
 	}
@@ -335,7 +343,7 @@ func (p *Processor) Algorithm(
 		return err
 	}
 
-	opts := &AlgorithmOptions{DependsOn: []AlgorithmFunc{}}
+	opts := &AlgorithmOptions{}
 	for _, option := range options {
 		option(opts)
 	}
@@ -375,12 +383,12 @@ func (p *Processor) Algorithm(
 	p.registry.addWindowTrigger(algo.FullWindowName(), algo)
 
 	for _, dep := range opts.DependsOn {
-		isRemote := isRemoteAlgorithm(dep)
-		if !isRemote && !p.registry.hasAlgorithmFunc(dep) {
+		isRemote := isRemoteAlgorithm(dep.Algorithm)
+		if !isRemote && !p.registry.hasAlgorithmFunc(dep.Algorithm) {
 			p.erroredDuringConfiguration = true
 			return InvalidDependencyError{"dependency must be registered before use"}
 		}
-		if err := p.registry.addDependency(fullName, dep, isRemote); err != nil {
+		if err := p.registry.addDependency(fullName, dep.Algorithm, isRemote); err != nil {
 			p.erroredDuringConfiguration = true
 			return err
 		}
@@ -571,7 +579,7 @@ func (p *Processor) HealthCheck(ctx context.Context, req *contract.HealthCheckRe
 
 // Register registers the processor with Orca Core
 func (p *Processor) Register(ctx context.Context) error {
-	log.Info().Str("name", p.name).Msg("preparing to register processor with Orca Core")
+	log.Info().Str("name", p.name).Msg("preparing to register processor '%s' with Orca Core")
 
 	if p.erroredDuringConfiguration {
 		log.Error().Msg("processor errored during setup - not continuing")
@@ -609,7 +617,7 @@ func (p *Processor) Register(ctx context.Context) error {
 			})
 		}
 
-		// Add dependencies
+		// add dependencies
 		if deps, exists := p.registry.dependencies[algo.FullName()]; exists {
 			for _, dep := range deps {
 				lookback := p.registry.getLookback(algo.FullName(), dep.FullName())
@@ -770,7 +778,8 @@ func getEnv(key, defaultValue string) string {
 
 func extractAlgorithmMeta(fn AlgorithmFunc) (name, version string) {
 	// In Go, we'd need to store metadata differently
-	// This is a placeholder - actual implementation would use reflection or metadata storage
+	// This is a placeholder - actual implementation would use
+	// reflection or metadata storage
 	return "", ""
 }
 
@@ -808,13 +817,4 @@ func WithLookbackTD(td time.Duration) LookbackOption {
 	return func(p *lookbackParams) {
 		p.TD = td
 	}
-}
-
-// ApplyLookback applies lookback options (this would be used differently in Go)
-func ApplyLookback(opts ...LookbackOption) lookbackParams {
-	params := lookbackParams{}
-	for _, opt := range opts {
-		opt(&params)
-	}
-	return params
 }

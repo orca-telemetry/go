@@ -53,8 +53,9 @@ func TestAlgorithmsRegistered(t *testing.T) {
 		window,
 		structAlgo,
 		sdk.KindStruct,
-		sdk.WithDependencies([]sdk.AlgorithmFunc{
-			noneAlgo,
+		sdk.WithDependencies([]sdk.Dependency{{
+			Algorithm: noneAlgo,
+		},
 		}),
 	)
 	assert.NoError(t, err)
@@ -93,8 +94,9 @@ func TestAlgorithmAlreadyExists(t *testing.T) {
 		window,
 		noneAlgo,
 		sdk.KindNone,
-		sdk.WithDependencies([]sdk.AlgorithmFunc{
-			structAlgo,
+		sdk.WithDependencies([]sdk.Dependency{{
+			Algorithm: structAlgo,
+		},
 		}),
 	)
 	assert.NoError(t, err)
@@ -114,4 +116,43 @@ func TestAlgorithmAlreadyExists(t *testing.T) {
 
 	err = proc.Register(context.Background())
 	assert.Error(t, err)
+}
+
+func TestDependencyWithLoobackWorks(t *testing.T) {
+
+	proc := sdk.NewProcessor("test_processor", sdk.WithOrcaCore(orcaConnStr))
+	window := sdk.WindowType{
+		Name:        "MyTriggeringWindow",
+		Version:     "1.0.0",
+		Description: "A simple triggering window for testing purposes",
+		MetadataFields: []sdk.MetadataField{
+			{Name: "asset_id", Description: "id of the asset"},
+			{Name: "cycles", Description: "an arbitrary field"},
+		},
+	}
+
+	err := proc.Algorithm(
+		"NoneAlgorithm",
+		"1.0.0",
+		"This algorithm does nothing",
+		window,
+		noneAlgo, sdk.KindNone,
+	)
+
+	assert.NoError(t, err)
+
+	err = proc.Algorithm(
+		"StructAlgorithm",
+		"1.0.0",
+		"This algorithm produces a dummy struct",
+		window,
+		structAlgo,
+		sdk.KindStruct,
+		sdk.WithDependencies([]sdk.Dependency{{Algorithm: noneAlgo}}),
+	)
+	assert.NoError(t, err)
+
+	err = proc.Register(context.Background())
+	assert.NoError(t, err)
+
 }
