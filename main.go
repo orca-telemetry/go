@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/md5"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -13,7 +14,6 @@ import (
 	"reflect"
 	"regexp"
 	"runtime"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -121,7 +121,7 @@ func (r *algorithmRegistry) addAlgorithm(name string, algo *Algorithm) error {
 	defer r.mu.Unlock()
 
 	if _, exists := r.algorithms[name]; exists {
-		return fmt.Errorf("algorithm %s already exists", name)
+		return InvalidAlgorithmArgumentError{fmt.Sprintf("algorithm %s already exists", name)}
 	}
 	log.Info().Msg(fmt.Sprintf("Registering algorithm: %s (window: %s)", name, algo.FullWindowName()))
 
@@ -207,18 +207,19 @@ func (r *algorithmRegistry) getLookback(from, to string) lookbackParams {
 type Processor struct {
 	contract.UnimplementedOrcaProcessorServer
 
-	name                  string
-	processorConnStr      string
-	orcaProcessorConnStr  string
-	runtime               string
-	maxWorkers            int
-	registry              *algorithmRegistry
-	orcaCore              string
-	isProduction          bool
-	projectName           string
-	processorPort         string
-	processorHost         string
-	processorExternalPort string
+	name                       string
+	processorConnStr           string
+	orcaProcessorConnStr       string
+	runtime                    string
+	maxWorkers                 int
+	registry                   *algorithmRegistry
+	orcaCore                   string
+	isProduction               bool
+	projectName                string
+	processorPort              string
+	processorHost              string
+	processorExternalPort      string
+	erroredDuringConfiguration bool
 }
 
 // ProcessorOption configures a Processor
@@ -276,16 +277,17 @@ func WithProcessorExternalPort(port string) ProcessorOption {
 // NewProcessor creates a new Orca processor
 func NewProcessor(name string, opts ...ProcessorOption) *Processor {
 	p := &Processor{
-		name:                  name,
-		runtime:               runtime.Version(),
-		maxWorkers:            10,
-		registry:              newAlgorithmRegistry(),
-		orcaCore:              getEnv("ORCA_CORE", "localhost:50051"),
-		isProduction:          getEnv("ORCA_ENV", "development") == "production",
-		projectName:           getEnv("PROJECT_NAME", ""),
-		processorPort:         getEnv("PROCESSOR_PORT", "50052"),
-		processorHost:         getEnv("PROCESSOR_HOST", "localhost"),
-		processorExternalPort: getEnv("PROCESSOR_EXTERNAL_PORT", "50052"),
+		name:                       name,
+		runtime:                    runtime.Version(),
+		maxWorkers:                 10,
+		registry:                   newAlgorithmRegistry(),
+		orcaCore:                   getEnv("ORCA_CORE", "localhost:50051"),
+		isProduction:               getEnv("ORCA_ENV", "development") == "production",
+		projectName:                getEnv("PROJECT_NAME", ""),
+		processorPort:              getEnv("PROCESSOR_PORT", "50052"),
+		processorHost:              getEnv("PROCESSOR_HOST", "localhost"),
+		processorExternalPort:      getEnv("PROCESSOR_EXTERNAL_PORT", "50052"),
+		erroredDuringConfiguration: false,
 	}
 
 	for _, opt := range opts {
@@ -316,26 +318,41 @@ func (p *Processor) Algorithm(
 	description string,
 	windowType WindowType,
 	execFunc AlgorithmFunc,
+	resultKind ResultKind,
 	options ...AlgorithmOption,
 ) error {
 	if !algorithmNamePattern.MatchString(name) {
+		p.erroredDuringConfiguration = true
 		return InvalidAlgorithmArgumentError{fmt.Sprintf("algorithm name '%s' must be in PascalCase", name)}
 	}
 	if !semverPattern.MatchString(version) {
+		p.erroredDuringConfiguration = true
 		return InvalidAlgorithmArgumentError{fmt.Sprintf("version '%s' must follow basic semantic versioning", version)}
 	}
-	if err := windowType.Validate(); err != nil {
-		return err
-	}
 
-	resultType := inferResultType(execFunc)
-	if resultType == contract.ResultType_NOT_SPECIFIED {
-		return InvalidAlgorithmReturnTypeError{"cannot infer result type from algorithm function"}
+	if err := windowType.Validate(); err != nil {
+		p.erroredDuringConfiguration = true
+		return err
 	}
 
 	opts := &AlgorithmOptions{DependsOn: []AlgorithmFunc{}}
 	for _, option := range options {
 		option(opts)
+	}
+
+	var resultTypeContract contract.ResultType
+	switch resultKind {
+	case KindStruct:
+		resultTypeContract = contract.ResultType_STRUCT
+	case KindArray:
+		resultTypeContract = contract.ResultType_ARRAY
+	case KindValue:
+		resultTypeContract = contract.ResultType_VALUE
+	case KindNone:
+		resultTypeContract = contract.ResultType_NONE
+	default:
+		p.erroredDuringConfiguration = true
+		return InvalidAlgorithmReturnTypeError{fmt.Sprintf("result type not supported. found: %v", resultKind)}
 	}
 
 	algo := &Algorithm{
@@ -346,11 +363,12 @@ func (p *Processor) Algorithm(
 		ExecFunc:    execFunc,
 		Processor:   p.name,
 		Runtime:     p.runtime,
-		ResultType:  resultType,
+		ResultType:  resultTypeContract,
 	}
 
 	fullName := algo.FullName()
 	if err := p.registry.addAlgorithm(fullName, algo); err != nil {
+		p.erroredDuringConfiguration = true
 		return err
 	}
 
@@ -359,9 +377,11 @@ func (p *Processor) Algorithm(
 	for _, dep := range opts.DependsOn {
 		isRemote := isRemoteAlgorithm(dep)
 		if !isRemote && !p.registry.hasAlgorithmFunc(dep) {
+			p.erroredDuringConfiguration = true
 			return InvalidDependencyError{"dependency must be registered before use"}
 		}
 		if err := p.registry.addDependency(fullName, dep, isRemote); err != nil {
+			p.erroredDuringConfiguration = true
 			return err
 		}
 	}
@@ -551,7 +571,12 @@ func (p *Processor) HealthCheck(ctx context.Context, req *contract.HealthCheckRe
 
 // Register registers the processor with Orca Core
 func (p *Processor) Register(ctx context.Context) error {
-	log.Info().Str("name", p.name).Msg("Preparing to register processor '%s' with Orca Core")
+	log.Info().Str("name", p.name).Msg("preparing to register processor with Orca Core")
+
+	if p.erroredDuringConfiguration {
+		log.Error().Msg("processor errored during setup - not continuing")
+		return errors.New("processor errored during setup - not continuing")
+	}
 
 	req := &contract.ProcessorRegistration{
 		Name:          p.name,
@@ -766,33 +791,6 @@ func isRemoteAlgorithm(fn AlgorithmFunc) bool {
 
 func isSameFunc(f1, f2 AlgorithmFunc) bool {
 	return reflect.ValueOf(f1).Pointer() == reflect.ValueOf(f2).Pointer()
-}
-
-func inferResultType(fn AlgorithmFunc) contract.ResultType {
-	fnType := reflect.TypeOf(fn)
-	if fnType.Kind() != reflect.Func {
-		return contract.ResultType_NOT_SPECIFIED
-	}
-
-	if fnType.NumOut() < 1 {
-		return contract.ResultType_NOT_SPECIFIED
-	}
-
-	returnType := fnType.Out(0)
-	typeName := returnType.String()
-
-	switch {
-	case strings.Contains(typeName, "StructResult"):
-		return contract.ResultType_STRUCT
-	case strings.Contains(typeName, "ValueResult"):
-		return contract.ResultType_VALUE
-	case strings.Contains(typeName, "ArrayResult"):
-		return contract.ResultType_ARRAY
-	case strings.Contains(typeName, "NoneResult"):
-		return contract.ResultType_NONE
-	default:
-		return contract.ResultType_NOT_SPECIFIED
-	}
 }
 
 // Lookback adds lookback metadata to an algorithm function

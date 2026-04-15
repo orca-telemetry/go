@@ -1,4 +1,4 @@
-module github.com/orca-telemetry/golang-sdk
+module github.com/orca-telemetry/sdk
 
 go 1.25.3
 
