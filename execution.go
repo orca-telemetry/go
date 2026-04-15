@@ -2,7 +2,7 @@ package orca
 
 import (
 	"fmt"
-	pb "github.com/orca-telemetry/core/protobufs/go"
+	contract "github.com/orca-telemetry/contract/go"
 )
 
 // DependencyResultRow represents a single result from a dependency
@@ -67,7 +67,7 @@ type ExecutionParams struct {
 }
 
 // NewExecutionParams creates ExecutionParams from a protobuf Window
-func NewExecutionParams(window *pb.Window, deps *Dependencies) *ExecutionParams {
+func NewExecutionParams(window *contract.Window, deps *Dependencies) *ExecutionParams {
 	metadata := make(map[string]any)
 	if window.Metadata != nil {
 		metadata = window.Metadata.AsMap()

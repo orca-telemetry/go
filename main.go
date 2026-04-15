@@ -25,7 +25,7 @@ import (
 	"google.golang.org/protobuf/types/known/structpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	pb "github.com/orca-telemetry/core/protobufs/go"
+	contract "github.com/orca-telemetry/contract/go"
 
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
@@ -67,7 +67,7 @@ type Algorithm struct {
 	ExecFunc    AlgorithmFunc
 	Processor   string
 	Runtime     string
-	ResultType  pb.ResultType
+	ResultType  contract.ResultType
 	LookbackN   int
 	LookbackTD  time.Duration
 }
@@ -205,7 +205,7 @@ func (r *algorithmRegistry) getLookback(from, to string) lookbackParams {
 
 // Processor is the entry point for registering algorithms in Orca
 type Processor struct {
-	pb.UnimplementedOrcaProcessorServer
+	contract.UnimplementedOrcaProcessorServer
 
 	name                  string
 	processorConnStr      string
@@ -329,7 +329,7 @@ func (p *Processor) Algorithm(
 	}
 
 	resultType := inferResultType(execFunc)
-	if resultType == pb.ResultType_NOT_SPECIFIED {
+	if resultType == contract.ResultType_NOT_SPECIFIED {
 		return InvalidAlgorithmReturnTypeError{"cannot infer result type from algorithm function"}
 	}
 
@@ -370,18 +370,18 @@ func (p *Processor) Algorithm(
 }
 
 // ExecuteDagPart implements the gRPC method
-func (p *Processor) ExecuteDagPart(req *pb.ExecutionRequest, stream pb.OrcaProcessor_ExecuteDagPartServer) error {
+func (p *Processor) ExecuteDagPart(req *contract.ExecutionRequest, stream contract.OrcaProcessor_ExecuteDagPartServer) error {
 	log.Info().Msg(fmt.Sprintf("Received DAG execution request with %d algorithms and ExecId: %s",
 		len(req.AlgorithmExecutions), req.ExecId))
 
 	// ctx := stream.Context()
 	// FIXME: Feed back in to the algorithm
-	results := make(chan *pb.ExecutionResult, len(req.AlgorithmExecutions))
+	results := make(chan *contract.ExecutionResult, len(req.AlgorithmExecutions))
 	var wg sync.WaitGroup
 
 	for _, algoExec := range req.AlgorithmExecutions {
 		wg.Add(1)
-		go func(exec *pb.ExecuteAlgorithm) {
+		go func(exec *contract.ExecuteAlgorithm) {
 			defer wg.Done()
 			result := p.executeAlgorithm(req.ExecId, exec.Algorithm, req.Window, exec.Dependencies)
 			results <- result
@@ -403,7 +403,7 @@ func (p *Processor) ExecuteDagPart(req *pb.ExecutionRequest, stream pb.OrcaProce
 	return nil
 }
 
-func (p *Processor) executeAlgorithm(execID string, algorithm *pb.Algorithm, window *pb.Window, dependencies []*pb.AlgorithmDependencyResult) *pb.ExecutionResult {
+func (p *Processor) executeAlgorithm(execID string, algorithm *contract.Algorithm, window *contract.Window, dependencies []*contract.AlgorithmDependencyResult) *contract.ExecutionResult {
 	log.Debug().Str("name", algorithm.Name).Str("version", algorithm.Version).Msg("Processing algorithm: %s_%s")
 
 	algoName := fmt.Sprintf("%s_%s", algorithm.Name, algorithm.Version)
@@ -428,15 +428,15 @@ func (p *Processor) executeAlgorithm(execID string, algorithm *pb.Algorithm, win
 		for _, res := range depResult.Result {
 			var value any
 			switch v := res.Result.ResultData.(type) {
-			case *pb.Result_SingleValue:
+			case *contract.Result_SingleValue:
 				value = v.SingleValue
-			case *pb.Result_FloatValues:
+			case *contract.Result_FloatValues:
 				vals := make([]any, len(v.FloatValues.Values))
 				for i, f := range v.FloatValues.Values {
 					vals[i] = f
 				}
 				value = vals
-			case *pb.Result_StructValue:
+			case *contract.Result_StructValue:
 				value = v.StructValue.AsMap()
 			}
 
@@ -470,22 +470,22 @@ func (p *Processor) executeAlgorithm(execID string, algorithm *pb.Algorithm, win
 	return p.createSuccessResult(execID, algorithm, result)
 }
 
-func (p *Processor) createErrorResult(execID string, algorithm *pb.Algorithm, err error) *pb.ExecutionResult {
+func (p *Processor) createErrorResult(execID string, algorithm *contract.Algorithm, err error) *contract.ExecutionResult {
 	log.Error().Err(err).Str("name", algorithm.Name).Msg("Algorithm %s failed")
 
 	errorStruct, _ := structpb.NewStruct(map[string]any{
 		"error": err.Error(),
 	})
-	errorStructPb := pb.Result_StructValue{
+	errorStructPb := contract.Result_StructValue{
 		StructValue: errorStruct,
 	}
 
-	return &pb.ExecutionResult{
+	return &contract.ExecutionResult{
 		ExecId: execID,
-		AlgorithmResult: &pb.AlgorithmResult{
+		AlgorithmResult: &contract.AlgorithmResult{
 			Algorithm: algorithm,
-			Result: &pb.Result{
-				Status:     pb.ResultStatus_RESULT_STATUS_UNHANDLED_FAILED,
+			Result: &contract.Result{
+				Status:     contract.ResultStatus_RESULT_STATUS_UNHANDLED_FAILED,
 				ResultData: &errorStructPb,
 				Timestamp:  time.Now().Unix(),
 			},
@@ -493,21 +493,21 @@ func (p *Processor) createErrorResult(execID string, algorithm *pb.Algorithm, er
 	}
 }
 
-func (p *Processor) createSuccessResult(execID string, algorithm *pb.Algorithm, result Result) *pb.ExecutionResult {
-	pbResult := &pb.Result{
-		Status:    pb.ResultStatus_RESULT_STATUS_SUCEEDED,
+func (p *Processor) createSuccessResult(execID string, algorithm *contract.Algorithm, result Result) *contract.ExecutionResult {
+	pbResult := &contract.Result{
+		Status:    contract.ResultStatus_RESULT_STATUS_SUCEEDED,
 		Timestamp: time.Now().Unix(),
 	}
 
 	switch r := result.(type) {
 	case StructResult:
 		structVal, _ := structpb.NewStruct(r.Value)
-		pbResult.ResultData = &pb.Result_StructValue{StructValue: structVal}
+		pbResult.ResultData = &contract.Result_StructValue{StructValue: structVal}
 	case ValueResult:
 		if f, ok := r.Value.(Float64Value); ok {
-			pbResult.ResultData = &pb.Result_SingleValue{SingleValue: float32(f)}
+			pbResult.ResultData = &contract.Result_SingleValue{SingleValue: float32(f)}
 		} else if i, ok := r.Value.(IntValue); ok {
-			pbResult.ResultData = &pb.Result_SingleValue{SingleValue: float32(i)}
+			pbResult.ResultData = &contract.Result_SingleValue{SingleValue: float32(i)}
 		}
 	case ArrayResult:
 		if f, ok := r.Value.(Float64Array); ok {
@@ -515,19 +515,19 @@ func (p *Processor) createSuccessResult(execID string, algorithm *pb.Algorithm, 
 			for i, v := range f {
 				floats[i] = float32(v)
 			}
-			pbResult.ResultData = &pb.Result_FloatValues{FloatValues: &pb.FloatArray{Values: floats}}
+			pbResult.ResultData = &contract.Result_FloatValues{FloatValues: &contract.FloatArray{Values: floats}}
 		} else if i, ok := r.Value.(IntArray); ok {
 			floats := make([]float32, len(i))
 			for ii, v := range i {
 				floats[ii] = float32(v)
 			}
-			pbResult.ResultData = &pb.Result_FloatValues{FloatValues: &pb.FloatArray{Values: floats}}
+			pbResult.ResultData = &contract.Result_FloatValues{FloatValues: &contract.FloatArray{Values: floats}}
 		}
 	}
 
-	return &pb.ExecutionResult{
+	return &contract.ExecutionResult{
 		ExecId: execID,
-		AlgorithmResult: &pb.AlgorithmResult{
+		AlgorithmResult: &contract.AlgorithmResult{
 			Algorithm: algorithm,
 			Result:    pbResult,
 		},
@@ -535,12 +535,12 @@ func (p *Processor) createSuccessResult(execID string, algorithm *pb.Algorithm, 
 }
 
 // HealthCheck implements the gRPC method
-func (p *Processor) HealthCheck(ctx context.Context, req *pb.HealthCheckRequest) (*pb.HealthCheckResponse, error) {
+func (p *Processor) HealthCheck(ctx context.Context, req *contract.HealthCheckRequest) (*contract.HealthCheckResponse, error) {
 	log.Debug().Msg("Received health check request")
-	return &pb.HealthCheckResponse{
-		Status:  pb.HealthCheckResponse_STATUS_SERVING,
+	return &contract.HealthCheckResponse{
+		Status:  contract.HealthCheckResponse_STATUS_SERVING,
 		Message: "Processor is healthy",
-		Metrics: &pb.ProcessorMetrics{
+		Metrics: &contract.ProcessorMetrics{
 			ActiveTasks:   0,
 			MemoryBytes:   0,
 			CpuPercent:    0.0,
@@ -553,7 +553,7 @@ func (p *Processor) HealthCheck(ctx context.Context, req *pb.HealthCheckRequest)
 func (p *Processor) Register(ctx context.Context) error {
 	log.Info().Str("name", p.name).Msg("Preparing to register processor '%s' with Orca Core")
 
-	req := &pb.ProcessorRegistration{
+	req := &contract.ProcessorRegistration{
 		Name:          p.name,
 		Runtime:       p.runtime,
 		ConnectionStr: p.orcaProcessorConnStr,
@@ -565,12 +565,12 @@ func (p *Processor) Register(ctx context.Context) error {
 
 	p.registry.mu.RLock()
 	for _, algo := range p.registry.algorithms {
-		algoMsg := &pb.Algorithm{
+		algoMsg := &contract.Algorithm{
 			Name:        algo.Name,
 			Version:     algo.Version,
 			Description: algo.Description,
 			ResultType:  algo.ResultType,
-			WindowType: &pb.WindowType{
+			WindowType: &contract.WindowType{
 				Name:        algo.WindowType.Name,
 				Version:     algo.WindowType.Version,
 				Description: algo.WindowType.Description,
@@ -578,7 +578,7 @@ func (p *Processor) Register(ctx context.Context) error {
 		}
 
 		for _, field := range algo.WindowType.MetadataFields {
-			algoMsg.WindowType.MetadataFields = append(algoMsg.WindowType.MetadataFields, &pb.MetadataField{
+			algoMsg.WindowType.MetadataFields = append(algoMsg.WindowType.MetadataFields, &contract.MetadataField{
 				Name:        field.Name,
 				Description: field.Description,
 			})
@@ -588,16 +588,16 @@ func (p *Processor) Register(ctx context.Context) error {
 		if deps, exists := p.registry.dependencies[algo.FullName()]; exists {
 			for _, dep := range deps {
 				lookback := p.registry.getLookback(algo.FullName(), dep.FullName())
-				depMsg := &pb.AlgorithmDependency{
+				depMsg := &contract.AlgorithmDependency{
 					Name:             dep.Name,
 					Version:          dep.Version,
 					ProcessorName:    dep.Processor,
 					ProcessorRuntime: dep.Runtime,
 				}
 				if lookback.N > 0 {
-					depMsg.Lookback = &pb.AlgorithmDependency_LookbackNum{LookbackNum: uint32(lookback.N)}
+					depMsg.Lookback = &contract.AlgorithmDependency_LookbackNum{LookbackNum: uint32(lookback.N)}
 				} else if lookback.TD > 0 {
-					depMsg.Lookback = &pb.AlgorithmDependency_LookbackTimeDelta{LookbackTimeDelta: uint64(lookback.TD.Nanoseconds())}
+					depMsg.Lookback = &contract.AlgorithmDependency_LookbackTimeDelta{LookbackTimeDelta: uint64(lookback.TD.Nanoseconds())}
 				}
 				algoMsg.Dependencies = append(algoMsg.Dependencies, depMsg)
 			}
@@ -607,16 +607,16 @@ func (p *Processor) Register(ctx context.Context) error {
 		if remoteDeps, exists := p.registry.remoteDependencies[algo.FullName()]; exists {
 			for _, remoteDep := range remoteDeps {
 				lookback := p.registry.getLookback(algo.FullName(), remoteDep.FullName())
-				depMsg := &pb.AlgorithmDependency{
+				depMsg := &contract.AlgorithmDependency{
 					Name:             remoteDep.Name,
 					Version:          remoteDep.Version,
 					ProcessorName:    remoteDep.ProcessorName,
 					ProcessorRuntime: remoteDep.ProcessorRuntime,
 				}
 				if lookback.N > 0 {
-					depMsg.Lookback = &pb.AlgorithmDependency_LookbackNum{LookbackNum: uint32(lookback.N)}
+					depMsg.Lookback = &contract.AlgorithmDependency_LookbackNum{LookbackNum: uint32(lookback.N)}
 				} else if lookback.TD > 0 {
-					depMsg.Lookback = &pb.AlgorithmDependency_LookbackTimeDelta{LookbackTimeDelta: uint64(lookback.TD.Nanoseconds())}
+					depMsg.Lookback = &contract.AlgorithmDependency_LookbackTimeDelta{LookbackTimeDelta: uint64(lookback.TD.Nanoseconds())}
 				}
 				algoMsg.Dependencies = append(algoMsg.Dependencies, depMsg)
 			}
@@ -641,7 +641,7 @@ func (p *Processor) Register(ctx context.Context) error {
 	}
 	defer conn.Close()
 
-	client := pb.NewOrcaCoreClient(conn)
+	client := contract.NewOrcaCoreClient(conn)
 	resp, err := client.RegisterProcessor(ctx, req)
 	if err != nil {
 		return fmt.Errorf("registration failed: %w", err)
@@ -665,7 +665,7 @@ func (p *Processor) Start() error {
 		grpc.MaxSendMsgSize(50*1024*1024),
 	)
 
-	pb.RegisterOrcaProcessorServer(grpcServer, p)
+	contract.RegisterOrcaProcessorServer(grpcServer, p)
 	reflection.Register(grpcServer)
 
 	log.Info().Str("processorConnStr", p.processorConnStr).Msg("server listening")
@@ -693,7 +693,7 @@ func (p *Processor) Start() error {
 func EmitWindow(ctx context.Context, window Window, orcaCore string, isProduction bool) error {
 	log.Info().Object("window", window).Msg("Emitting window")
 
-	pbWindow := &pb.Window{
+	pbWindow := &contract.Window{
 		TimeFrom:          timestamppb.New(window.TimeFrom),
 		TimeTo:            timestamppb.New(window.TimeTo),
 		WindowTypeName:    window.Name,
@@ -724,7 +724,7 @@ func EmitWindow(ctx context.Context, window Window, orcaCore string, isProductio
 	}
 	defer conn.Close()
 
-	client := pb.NewOrcaCoreClient(conn)
+	client := contract.NewOrcaCoreClient(conn)
 	resp, err := client.EmitWindow(ctx, pbWindow)
 	if err != nil {
 		return fmt.Errorf("failed to emit window: %w", err)
@@ -768,14 +768,14 @@ func isSameFunc(f1, f2 AlgorithmFunc) bool {
 	return reflect.ValueOf(f1).Pointer() == reflect.ValueOf(f2).Pointer()
 }
 
-func inferResultType(fn AlgorithmFunc) pb.ResultType {
+func inferResultType(fn AlgorithmFunc) contract.ResultType {
 	fnType := reflect.TypeOf(fn)
 	if fnType.Kind() != reflect.Func {
-		return pb.ResultType_NOT_SPECIFIED
+		return contract.ResultType_NOT_SPECIFIED
 	}
 
 	if fnType.NumOut() < 1 {
-		return pb.ResultType_NOT_SPECIFIED
+		return contract.ResultType_NOT_SPECIFIED
 	}
 
 	returnType := fnType.Out(0)
@@ -783,15 +783,15 @@ func inferResultType(fn AlgorithmFunc) pb.ResultType {
 
 	switch {
 	case strings.Contains(typeName, "StructResult"):
-		return pb.ResultType_STRUCT
+		return contract.ResultType_STRUCT
 	case strings.Contains(typeName, "ValueResult"):
-		return pb.ResultType_VALUE
+		return contract.ResultType_VALUE
 	case strings.Contains(typeName, "ArrayResult"):
-		return pb.ResultType_ARRAY
+		return contract.ResultType_ARRAY
 	case strings.Contains(typeName, "NoneResult"):
-		return pb.ResultType_NONE
+		return contract.ResultType_NONE
 	default:
-		return pb.ResultType_NOT_SPECIFIED
+		return contract.ResultType_NOT_SPECIFIED
 	}
 }
 
