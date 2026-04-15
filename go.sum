@@ -113,6 +113,8 @@ github.com/opencontainers/image-spec v1.1.1 h1:y0fUlFfIZhPF1W537XOLg0/fcx6zcHCJw
 github.com/opencontainers/image-spec v1.1.1/go.mod h1:qpqAh3Dmcf36wStyyWU+kCeDgrGnAve2nCC8+7h8Q0M=
 github.com/orca-telemetry/core v0.12.0 h1:uGRzqFlSwj6YI75PjXJzq8MVfjfQ4SqiKw8kO6zQ1lQ=
 github.com/orca-telemetry/core v0.12.0/go.mod h1:R0fFaq5XibEuI7ZImPULfQv43872RIxYDUMTPy6ynTg=
+github.com/orca-telemetry/interface v1.0.0 h1:PfpGRFS01r5+EcreNxnknBN9uWUwETCMLDUPqQhsQGM=
+github.com/orca-telemetry/interface v1.0.0/go.mod h1:PsEqiAXAKzKvCEVAF2MLOUTdk/phOeFXqMbgca71orc=
 github.com/pkg/errors v0.9.1 h1:FEBLx1zS214owpjy7qsBeixbURkuhQAwrK5UwLGTwt4=
 github.com/pkg/errors v0.9.1/go.mod h1:bwawxfHBFNV+L2hUp1rHADufV3IMtnDRdf1r5NINEl0=
 github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
