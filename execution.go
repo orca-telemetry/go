@@ -2,14 +2,13 @@ package orca
 
 import (
 	"fmt"
-	pb "github.com/orca-telemetry/core/protobufs/go"
+	contract "github.com/orca-telemetry/contract/go"
 )
 
 // DependencyResultRow represents a single result from a dependency
 type DependencyResultRow struct {
 	Window Window
-	// FIXME: Use type constraints
-	Result any // float64, []float64, or map[string]interface{}
+	Result Result
 }
 
 // DependencyAlgorithm represents metadata about a dependency algorithm
@@ -48,16 +47,11 @@ func NewDependencies() *Dependencies {
 }
 
 // GetResult retrieves a dependency result by algorithm function
-func (d *Dependencies) GetResult(algoFunc AlgorithmFunc) *DependencyResult {
+func (d *Dependencies) GetResult(algorithm Algorithm) *DependencyResult {
 	if d.deps == nil {
 		return nil
 	}
-	name, version := extractAlgorithmMeta(algoFunc)
-	if name == "" || version == "" {
-		return nil
-	}
-	fullName := fmt.Sprintf("%s_%s", name, version)
-	return d.deps[fullName]
+	return d.deps[algorithm.FullName()]
 }
 
 // ExecutionParams provides context for algorithm execution
@@ -67,7 +61,7 @@ type ExecutionParams struct {
 }
 
 // NewExecutionParams creates ExecutionParams from a protobuf Window
-func NewExecutionParams(window *pb.Window, deps *Dependencies) *ExecutionParams {
+func NewExecutionParams(window *contract.Window, deps *Dependencies) *ExecutionParams {
 	metadata := make(map[string]any)
 	if window.Metadata != nil {
 		metadata = window.Metadata.AsMap()
