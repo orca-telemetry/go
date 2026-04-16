@@ -2,10 +2,13 @@ package orca_test
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"testing"
 	"time"
 
+	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
@@ -76,22 +79,43 @@ func setupPg(ctx context.Context, nw *testcontainers.DockerNetwork) (string, fun
 	return "postgres://user:password@db:5432/test?sslmode=disable", cleanup
 }
 
+type LogConsumer struct {
+	logger zerolog.Logger
+}
+
+func (l LogConsumer) Accept(log testcontainers.Log) {
+	switch log.LogType {
+	case "STDOUT":
+		l.logger.Info().Msg(string(log.Content))
+	case "STDERR":
+		l.logger.Err(errors.New(string(log.Content)))
+	default:
+		l.logger.Err(fmt.Errorf("unknown log type: %v", log.LogType))
+	}
+
+}
+
 func setupOrca(ctx context.Context, nw *testcontainers.DockerNetwork) (string, func()) {
 	log.Info().Str("db conn str", orcaDbConnStr).Msg("connection string")
+	logConsumer := LogConsumer{
+		logger: log.Logger,
+	}
 	orcaContainer, err := testcontainers.Run(
 		ctx,
 		"ghcr.io/orca-telemetry/core:latest",
+		testcontainers.WithLogConsumers(logConsumer),
 		network.WithNetwork([]string{"orca-nw"}, nw),
 		testcontainers.WithEnv(map[string]string{
 			"ORCA_CONNECTION_STRING": orcaDbConnStr,
 			"ORCA_PORT":              "4040",
-			"ORCA_LOG_LEVEL":         "DEBUG",
+			"ORCA_LOG_LEVEL":         "INFO",
 		}),
 		testcontainers.WithCmd("-migrate"),
 		testcontainers.WithExposedPorts("4040/tcp"),
 		testcontainers.WithWaitStrategy(
 			wait.ForListeningPort("4040/tcp").WithStartupTimeout(60*time.Second),
 		),
+		testcontainers.WithHostPortAccess(50052),
 	)
 
 	if err != nil {

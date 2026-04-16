@@ -36,11 +36,11 @@ func (e InvalidMetadataFieldError) Error() string {
 }
 
 func (e CompressedError) Error() string {
-	var compressedMsg string = "compressed stack of errors:\n"
+	var compressedMsg string
 	for _, msg := range e.errors {
 		compressedMsg = fmt.Sprintf("%v\n%v", compressedMsg, "----------------------------------")
 		compressedMsg = fmt.Sprintf("%v\n%v", compressedMsg, msg.Error())
 	}
-	compressedMsg = fmt.Sprintf("%v\n%v", compressedMsg, "----------------------------------")
+	compressedMsg = fmt.Sprintf("%v\n%v\n", compressedMsg, "----------------------------------")
 	return compressedMsg
 }

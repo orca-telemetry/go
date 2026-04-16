@@ -429,7 +429,7 @@ func (p *Processor) Register(ctx context.Context, algorithms []*Algorithm) error
 }
 
 // Start starts the gRPC server
-func (p *Processor) Start() error {
+func (p *Processor) Start(ctx context.Context) error {
 	log.Info().Str("name", p.name).Str("runtime", p.runtime).Msg("starting Orca Processor")
 	log.Info().Int("maxWorkers", p.maxWorkers).Msg("initialising gRPC server")
 
@@ -453,10 +453,17 @@ func (p *Processor) Start() error {
 	// Handle graceful shutdown
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGTERM, syscall.SIGINT)
+	contextChan := ctx.Done()
 
 	go func() {
 		<-sigChan
 		log.Info().Msg("recieved shutdown signal, stopping server...")
+		grpcServer.GracefulStop()
+	}()
+
+	go func() {
+		<-contextChan
+		log.Info().Msg("context completed, stopping server...")
 		grpcServer.GracefulStop()
 	}()
 

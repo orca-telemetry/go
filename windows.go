@@ -64,8 +64,8 @@ func NewWindow(
 }
 
 // EmitWindow emits a window to Orca-core
-func EmitWindow(ctx context.Context, window Window, orcaCore string, isProduction bool) error {
-	log.Info().Object("window", window).Msg("Emitting window")
+func EmitWindow(ctx context.Context, window *Window, orcaCore string, isProduction bool) error {
+	log.Info().Object("window", window).Msg("emitting window")
 
 	pbWindow := &contract.Window{
 		TimeFrom:          timestamppb.New(window.TimeFrom),
