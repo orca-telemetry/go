@@ -4,17 +4,18 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	sdk "github.com/orca-telemetry/sdk"
 	"github.com/stretchr/testify/assert"
 )
 
 // define some algorithms
-func noneAlgo(params *sdk.ExecutionParams) (sdk.Result, error) {
+func returnNone(params *sdk.ExecutionParams) (sdk.Result, error) {
 	return sdk.NoneResult{}, nil
 }
 
-func structAlgo(params *sdk.ExecutionParams) (sdk.Result, error) {
+func returnStruct(params *sdk.ExecutionParams) (sdk.Result, error) {
 	sampleStruct := make(map[string]any, 10)
 	for ii := range 10 {
 		sampleStruct[fmt.Sprintf("metric_%d", ii)] = float64(ii)
@@ -26,73 +27,75 @@ func structAlgo(params *sdk.ExecutionParams) (sdk.Result, error) {
 
 func TestAlgorithmsRegistered(t *testing.T) {
 	proc := sdk.NewProcessor("test_processor", sdk.WithOrcaCore(orcaConnStr))
-	window := sdk.WindowType{
-		Name:        "MyTriggeringWindow",
-		Version:     "1.0.0",
-		Description: "A simple triggering window for testing purposes",
-		MetadataFields: []sdk.MetadataField{
+	windowType, err := sdk.NewWindowType(
+		"MyTriggeringWindow",
+		"1.0.0",
+		"A simple triggering window for testing purposes",
+		[]sdk.MetadataField{
 			{Name: "asset_id", Description: "id of the asset"},
 			{Name: "cycles", Description: "an arbitrary field"},
 		},
-	}
+	)
+	assert.NoError(t, err)
 
-	err := proc.Algorithm(
+	noneAlgo, err := sdk.NewAlgorithm(
 		"NoneAlgorithm",
 		"1.0.0",
 		"This algorithm does nothing",
-		window,
-		noneAlgo, sdk.KindNone,
+		windowType,
+		returnNone,
+		sdk.KindNone,
 	)
-
 	assert.NoError(t, err)
 
-	err = proc.Algorithm(
+	structAlgo, err := sdk.NewAlgorithm(
 		"StructAlgorithm",
 		"1.0.0",
 		"This algorithm produces a dummy struct",
-		window,
-		structAlgo,
+		windowType,
+		returnStruct,
 		sdk.KindStruct,
 		sdk.WithDependencies([]sdk.Dependency{{
 			Algorithm: noneAlgo,
-		},
-		}),
+		}}),
 	)
 	assert.NoError(t, err)
 
-	err = proc.Register(context.Background())
+	err = proc.Register(context.Background(), []*sdk.Algorithm{noneAlgo, structAlgo})
 	assert.NoError(t, err)
 }
 
 func TestAlgorithmAlreadyExists(t *testing.T) {
 	proc := sdk.NewProcessor("test_processor", sdk.WithOrcaCore(orcaConnStr))
 
-	window := sdk.WindowType{
-		Name:        "MyTriggeringWindow",
-		Version:     "1.0.0",
-		Description: "A simple triggering window for testing purposes",
-		MetadataFields: []sdk.MetadataField{
+	var err error
+	window, err := sdk.NewWindowType(
+		"MyTriggeringWindow",
+		"1.0.0",
+		"A simple triggering window for testing purposes",
+		[]sdk.MetadataField{
 			{Name: "asset_id", Description: "id of the asset"},
 			{Name: "cycles", Description: "an arbitrary field"},
 		},
-	}
-	var err error
-	err = proc.Algorithm(
+	)
+	assert.NoError(t, err)
+
+	structAlgo, err := sdk.NewAlgorithm(
 		"StructAlgorithm",
 		"1.0.0",
 		"This algorithm produces a dummy struct",
 		window,
-		structAlgo,
+		returnStruct,
 		sdk.KindStruct,
 	)
 	assert.NoError(t, err)
 
-	err = proc.Algorithm(
+	noneAlgo, err := sdk.NewAlgorithm(
 		"NoneAlgorithm",
 		"1.0.0",
 		"This algorithm does nothing",
 		window,
-		noneAlgo,
+		returnNone,
 		sdk.KindNone,
 		sdk.WithDependencies([]sdk.Dependency{{
 			Algorithm: structAlgo,
@@ -101,58 +104,59 @@ func TestAlgorithmAlreadyExists(t *testing.T) {
 	)
 	assert.NoError(t, err)
 
-	// reregister
-	err = proc.Algorithm(
-		"StructAlgorithm",
-		"1.0.0",
-		"This algorithm produces a dummy struct",
-		window,
-		noneAlgo,
-		sdk.KindNone,
-	)
-
+	err = proc.Register(context.Background(), []*sdk.Algorithm{
+		noneAlgo, structAlgo, structAlgo,
+	})
 	var targetErr sdk.InvalidAlgorithmArgumentError
 	assert.ErrorAs(t, err, &targetErr)
-
-	err = proc.Register(context.Background())
-	assert.Error(t, err)
 }
 
-func TestDependencyWithLoobackWorks(t *testing.T) {
+func TestDependencyWithLookbackWorks(t *testing.T) {
 
 	proc := sdk.NewProcessor("test_processor", sdk.WithOrcaCore(orcaConnStr))
-	window := sdk.WindowType{
-		Name:        "MyTriggeringWindow",
-		Version:     "1.0.0",
-		Description: "A simple triggering window for testing purposes",
-		MetadataFields: []sdk.MetadataField{
+	windowType, err := sdk.NewWindowType(
+		"MyTriggeringWindow",
+		"1.0.0",
+		"A simple triggering window for testing purposes",
+		[]sdk.MetadataField{
 			{Name: "asset_id", Description: "id of the asset"},
 			{Name: "cycles", Description: "an arbitrary field"},
 		},
-	}
+	)
+	assert.NoError(t, err)
 
-	err := proc.Algorithm(
+	noneAlgo, err := sdk.NewAlgorithm(
 		"NoneAlgorithm",
 		"1.0.0",
 		"This algorithm does nothing",
-		window,
-		noneAlgo, sdk.KindNone,
+		windowType,
+		returnNone,
+		sdk.KindNone,
 	)
 
 	assert.NoError(t, err)
 
-	err = proc.Algorithm(
+	structAlgo, err := sdk.NewAlgorithm(
 		"StructAlgorithm",
 		"1.0.0",
 		"This algorithm produces a dummy struct",
-		window,
-		structAlgo,
+		windowType,
+		returnStruct,
 		sdk.KindStruct,
-		sdk.WithDependencies([]sdk.Dependency{{Algorithm: noneAlgo}}),
+		sdk.WithDependencies(
+			[]sdk.Dependency{
+				{
+					Algorithm: noneAlgo,
+					Lookback:  sdk.WithLookbackTD(time.Hour * 24 * time.Duration(20)),
+				},
+			},
+		),
 	)
+
 	assert.NoError(t, err)
 
-	err = proc.Register(context.Background())
+	err = proc.Register(context.Background(), []*sdk.Algorithm{
+		noneAlgo, structAlgo,
+	})
 	assert.NoError(t, err)
-
 }

@@ -8,8 +8,7 @@ import (
 // DependencyResultRow represents a single result from a dependency
 type DependencyResultRow struct {
 	Window Window
-	// FIXME: Use type constraints
-	Result any // float64, []float64, or map[string]interface{}
+	Result Result
 }
 
 // DependencyAlgorithm represents metadata about a dependency algorithm
@@ -48,16 +47,11 @@ func NewDependencies() *Dependencies {
 }
 
 // GetResult retrieves a dependency result by algorithm function
-func (d *Dependencies) GetResult(algoFunc AlgorithmFunc) *DependencyResult {
+func (d *Dependencies) GetResult(algorithm Algorithm) *DependencyResult {
 	if d.deps == nil {
 		return nil
 	}
-	name, version := extractAlgorithmMeta(algoFunc)
-	if name == "" || version == "" {
-		return nil
-	}
-	fullName := fmt.Sprintf("%s_%s", name, version)
-	return d.deps[fullName]
+	return d.deps[algorithm.FullName()]
 }
 
 // ExecutionParams provides context for algorithm execution

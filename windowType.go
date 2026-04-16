@@ -1,6 +1,11 @@
 package orca
 
-import "fmt"
+import (
+	"fmt"
+	"regexp"
+)
+
+var windowNamePattern = regexp.MustCompile(`^[A-Z][a-zA-Z0-9]*$`)
 
 // MetadataField describes a metadata field for a window type
 type MetadataField struct {
@@ -52,4 +57,38 @@ func (w WindowType) Validate() error {
 // FullName returns the full window name as "name_version"
 func (w WindowType) FullName() string {
 	return fmt.Sprintf("%s_%s", w.Name, w.Version)
+}
+
+func NewWindowType(
+	name string,
+	version string,
+	description string,
+	metadataFields []MetadataField,
+) (*WindowType, error) {
+
+	var err error
+	windowType := &WindowType{
+		Name:           name,
+		Version:        version,
+		Description:    description,
+		MetadataFields: metadataFields,
+	}
+
+	err = windowType.Validate()
+	if err != nil {
+		return nil, err
+	}
+
+	var errors []error
+
+	for _, f := range windowType.MetadataFields {
+		err = f.Validate()
+		if err != nil {
+			errors = append(errors, err)
+		}
+	}
+	if len(errors) > 0 {
+		return nil, CompressedError{errors: errors}
+	}
+	return windowType, nil
 }
