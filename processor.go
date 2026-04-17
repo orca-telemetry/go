@@ -141,7 +141,7 @@ func (p *Processor) ExecuteDagPart(
 			// if an error is produced here, this is not a result of the algorithm failing
 			// a failing algorithm produces an "Error Result"
 			// this is a catastrophic issue that should never happen
-			result, err := p.executeAlgorithm(req.ExecId, exec.Algorithm, req.Window, exec.Dependencies)
+			result, err := p.executeAlgorithm(req.ExecId, exec.Algorithm, req.Window, exec.Dependencies, exec.SelfResults)
 			outcomes <- Outcome{
 				Result: result,
 				Error:  err,
@@ -169,7 +169,13 @@ func (p *Processor) ExecuteDagPart(
 	return nil
 }
 
-func (p *Processor) executeAlgorithm(execID string, algorithm *contract.Algorithm, window *contract.Window, dependencies []*contract.AlgorithmDependencyResult) (*contract.ExecutionResult, error) {
+func (p *Processor) executeAlgorithm(
+	execID string,
+	algorithm *contract.Algorithm,
+	window *contract.Window,
+	dependencies []*contract.AlgorithmDependencyResult,
+	selfResults []*contract.AlgorithmDependencyResultRow,
+) (*contract.ExecutionResult, error) {
 	log.Debug().Str("name", algorithm.Name).Str("version", algorithm.Version).Msg("Processing algorithm: %s_%s")
 
 	algoName := fmt.Sprintf("%s_%s", algorithm.Name, algorithm.Version)
@@ -235,7 +241,22 @@ func (p *Processor) executeAlgorithm(execID string, algorithm *contract.Algorith
 		deps.deps[depAlgo.ID()] = depRes
 	}
 
-	params := NewExecutionParams(window, deps)
+	// if there are self results pack then in
+	var selfResultsPacked = make([]*DependencyResultRow, len(selfResults))
+	for ii, res := range selfResults {
+		selfResultsPacked[ii] = &DependencyResultRow{
+			Window: Window{
+				TimeFrom: res.Window.GetTimeFrom().AsTime(),
+				TimeTo:   res.Window.GetTimeTo().AsTime(),
+				Name:     res.Window.GetWindowTypeName(),
+				Version:  res.Window.GetWindowTypeVersion(),
+				Origin:   res.Window.GetOrigin(),
+				Metadata: res.Window.GetMetadata().AsMap(),
+			},
+		}
+	}
+
+	params := NewExecutionParams(window, deps, selfResultsPacked)
 
 	// execute algorithm
 	result, err := algo.ExecFunc(params)

@@ -58,10 +58,11 @@ func (d *Dependencies) GetResult(algorithm Algorithm) *DependencyResult {
 type ExecutionParams struct {
 	Window       Window
 	Dependencies *Dependencies
+	SelfResults  []*DependencyResultRow
 }
 
 // NewExecutionParams creates ExecutionParams from a protobuf Window
-func NewExecutionParams(window *contract.Window, deps *Dependencies) *ExecutionParams {
+func NewExecutionParams(window *contract.Window, deps *Dependencies, selfResults []*DependencyResultRow) *ExecutionParams {
 	metadata := make(map[string]any)
 	if window.Metadata != nil {
 		metadata = window.Metadata.AsMap()
@@ -77,5 +78,6 @@ func NewExecutionParams(window *contract.Window, deps *Dependencies) *ExecutionP
 			Metadata: metadata,
 		},
 		Dependencies: deps,
+		SelfResults:  selfResults,
 	}
 }
