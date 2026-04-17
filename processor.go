@@ -342,16 +342,39 @@ func (p *Processor) Register(ctx context.Context, algorithms []*Algorithm) error
 	p.registry.mu.RLock()
 
 	for _, algo := range p.registry.algorithms {
-		algoMsg := &contract.Algorithm{
-			Name:        algo.Name,
-			Version:     algo.Version,
-			Description: algo.Description,
-			ResultType:  algo.ResultType,
-			WindowType: &contract.WindowType{
-				Name:        algo.WindowType.Name,
-				Version:     algo.WindowType.Version,
-				Description: algo.WindowType.Description,
-			},
+		var algoMsg *contract.Algorithm
+		if algo.SelfLookbackTd > 0 {
+			// Td takes priority
+			algoMsg = &contract.Algorithm{
+				Name:        algo.Name,
+				Version:     algo.Version,
+				Description: algo.Description,
+				ResultType:  algo.ResultType,
+				WindowType: &contract.WindowType{
+					Name:        algo.WindowType.Name,
+					Version:     algo.WindowType.Version,
+					Description: algo.WindowType.Description,
+				},
+				Lookback: &contract.Algorithm_LookbackTimeDelta{
+					LookbackTimeDelta: uint64(algo.SelfLookbackTd.Nanoseconds()),
+				},
+			}
+		} else {
+			// Td takes priority
+			algoMsg = &contract.Algorithm{
+				Name:        algo.Name,
+				Version:     algo.Version,
+				Description: algo.Description,
+				ResultType:  algo.ResultType,
+				WindowType: &contract.WindowType{
+					Name:        algo.WindowType.Name,
+					Version:     algo.WindowType.Version,
+					Description: algo.WindowType.Description,
+				},
+				Lookback: &contract.Algorithm_LookbackNum{
+					LookbackNum: uint32(algo.SelfLookbackN),
+				},
+			}
 		}
 
 		for _, field := range algo.WindowType.MetadataFields {

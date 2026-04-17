@@ -4,6 +4,7 @@ import (
 	"crypto/md5"
 	"fmt"
 	"regexp"
+	"time"
 
 	contract "github.com/orca-telemetry/contract/go"
 )
@@ -30,13 +31,15 @@ type AlgorithmFunc func(params *ExecutionParams) (Result, error)
 
 // Algorithm represents a registered algorithm
 type Algorithm struct {
-	Name         string
-	Version      string
-	Description  string
-	WindowType   *WindowType
-	ExecFunc     AlgorithmFunc
-	ResultType   contract.ResultType
-	Dependencies []Dependency
+	Name           string
+	Version        string
+	Description    string
+	WindowType     *WindowType
+	ExecFunc       AlgorithmFunc
+	ResultType     contract.ResultType
+	Dependencies   []Dependency
+	SelfLookbackN  int
+	SelfLookbackTd time.Duration
 }
 
 // FullName returns the name of the algorithm as "<name>_<version>"
@@ -53,7 +56,9 @@ func (a Algorithm) ID(processor string, runtime string) string {
 // AlgorithmOptions define a set of options for configuring
 // the AddAlgorithm call
 type AlgorithmOptions struct {
-	DependsOn []Dependency
+	DependsOn      []Dependency
+	SelfLookbackN  int
+	SelfLookbackTd time.Duration
 }
 
 type AlgorithmOption func(*AlgorithmOptions)
@@ -67,6 +72,20 @@ type Dependency struct {
 func WithDependencies(dependencies []Dependency) AlgorithmOption {
 	return func(o *AlgorithmOptions) {
 		o.DependsOn = dependencies
+	}
+}
+
+// WithLookbackN sets the number-based lookback
+func WithSelfLookbackN(n int) AlgorithmOption {
+	return func(o *AlgorithmOptions) {
+		o.SelfLookbackN = n
+	}
+}
+
+// WithLookbackTD sets the time-based lookback
+func WithSelfLookbackTD(td time.Duration) AlgorithmOption {
+	return func(o *AlgorithmOptions) {
+		o.SelfLookbackTd = td
 	}
 }
 
@@ -110,13 +129,16 @@ func NewAlgorithm(
 	}
 
 	algo := &Algorithm{
-		Name:         name,
-		Version:      version,
-		Description:  description,
-		WindowType:   windowType,
-		ExecFunc:     execFunc,
-		ResultType:   resultTypeContract,
-		Dependencies: opts.DependsOn,
+		Name:           name,
+		Version:        version,
+		Description:    description,
+		WindowType:     windowType,
+		ExecFunc:       execFunc,
+		ResultType:     resultTypeContract,
+		Dependencies:   opts.DependsOn,
+		SelfLookbackN:  opts.SelfLookbackN,
+		SelfLookbackTd: opts.SelfLookbackTd,
 	}
+
 	return algo, nil
 }
