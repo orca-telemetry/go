@@ -63,3 +63,17 @@ func WithLookbackTD(td time.Duration) LookbackOption {
 		p.TD = td
 	}
 }
+
+// WithLookbackGapN sets the number-based lookback
+func WithLookbackGapN(n int) LookbackOption {
+	return func(p *lookbackParams) {
+		p.GapN = n
+	}
+}
+
+// WithLookbackGapTD sets the time-based lookback
+func WithLookbackGapTD(td time.Duration) LookbackOption {
+	return func(p *lookbackParams) {
+		p.GapTD = td
+	}
+}

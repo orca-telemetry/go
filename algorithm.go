@@ -31,15 +31,17 @@ type AlgorithmFunc func(params *ExecutionParams) (Result, error)
 
 // Algorithm represents a registered algorithm
 type Algorithm struct {
-	Name           string
-	Version        string
-	Description    string
-	WindowType     *WindowType
-	ExecFunc       AlgorithmFunc
-	ResultType     contract.ResultType
-	Dependencies   []Dependency
-	SelfLookbackN  int
-	SelfLookbackTd time.Duration
+	Name              string
+	Version           string
+	Description       string
+	WindowType        *WindowType
+	ExecFunc          AlgorithmFunc
+	ResultType        contract.ResultType
+	Dependencies      []Dependency
+	SelfLookbackN     int
+	SelfLookbackTd    time.Duration
+	SelfLookbackGapN  int
+	SelfLookbackGapTd time.Duration
 }
 
 // FullName returns the name of the algorithm as "<name>_<version>"
@@ -56,9 +58,11 @@ func (a Algorithm) ID(processor string, runtime string) string {
 // AlgorithmOptions define a set of options for configuring
 // the AddAlgorithm call
 type AlgorithmOptions struct {
-	DependsOn      []Dependency
-	SelfLookbackN  int
-	SelfLookbackTd time.Duration
+	DependsOn         []Dependency
+	SelfLookbackN     int
+	SelfLookbackTd    time.Duration
+	SelfLookbackGapN  int
+	selfLookbackGapTd time.Duration
 }
 
 type AlgorithmOption func(*AlgorithmOptions)
@@ -86,6 +90,18 @@ func WithSelfLookbackN(n int) AlgorithmOption {
 func WithSelfLookbackTD(td time.Duration) AlgorithmOption {
 	return func(o *AlgorithmOptions) {
 		o.SelfLookbackTd = td
+	}
+}
+
+func WithSelfLookbackGapN(n int) AlgorithmOption {
+	return func(o *AlgorithmOptions) {
+		o.SelfLookbackGapN = n
+	}
+}
+
+func WithSelfLookbackGapTD(td time.Duration) AlgorithmOption {
+	return func(o *AlgorithmOptions) {
+		o.selfLookbackGapTd = td
 	}
 }
 
@@ -129,15 +145,17 @@ func NewAlgorithm(
 	}
 
 	algo := &Algorithm{
-		Name:           name,
-		Version:        version,
-		Description:    description,
-		WindowType:     windowType,
-		ExecFunc:       execFunc,
-		ResultType:     resultTypeContract,
-		Dependencies:   opts.DependsOn,
-		SelfLookbackN:  opts.SelfLookbackN,
-		SelfLookbackTd: opts.SelfLookbackTd,
+		Name:              name,
+		Version:           version,
+		Description:       description,
+		WindowType:        windowType,
+		ExecFunc:          execFunc,
+		ResultType:        resultTypeContract,
+		Dependencies:      opts.DependsOn,
+		SelfLookbackN:     opts.SelfLookbackN,
+		SelfLookbackTd:    opts.SelfLookbackTd,
+		SelfLookbackGapN:  opts.SelfLookbackGapN,
+		SelfLookbackGapTd: opts.SelfLookbackTd,
 	}
 
 	return algo, nil

@@ -364,37 +364,36 @@ func (p *Processor) Register(ctx context.Context, algorithms []*Algorithm) error
 
 	for _, algo := range p.registry.algorithms {
 		var algoMsg *contract.Algorithm
+
+		algoMsg = &contract.Algorithm{
+			Name:        algo.Name,
+			Version:     algo.Version,
+			Description: algo.Description,
+			ResultType:  algo.ResultType,
+			WindowType: &contract.WindowType{
+				Name:        algo.WindowType.Name,
+				Version:     algo.WindowType.Version,
+				Description: algo.WindowType.Description,
+			},
+		}
+
 		if algo.SelfLookbackTd > 0 {
-			// Td takes priority
-			algoMsg = &contract.Algorithm{
-				Name:        algo.Name,
-				Version:     algo.Version,
-				Description: algo.Description,
-				ResultType:  algo.ResultType,
-				WindowType: &contract.WindowType{
-					Name:        algo.WindowType.Name,
-					Version:     algo.WindowType.Version,
-					Description: algo.WindowType.Description,
-				},
-				Lookback: &contract.Algorithm_LookbackTimeDelta{
-					LookbackTimeDelta: uint64(algo.SelfLookbackTd.Nanoseconds()),
-				},
+			algoMsg.Lookback = &contract.Algorithm_LookbackTimeDelta{
+				LookbackTimeDelta: uint64(algo.SelfLookbackTd.Nanoseconds()),
 			}
 		} else {
-			// Td takes priority
-			algoMsg = &contract.Algorithm{
-				Name:        algo.Name,
-				Version:     algo.Version,
-				Description: algo.Description,
-				ResultType:  algo.ResultType,
-				WindowType: &contract.WindowType{
-					Name:        algo.WindowType.Name,
-					Version:     algo.WindowType.Version,
-					Description: algo.WindowType.Description,
-				},
-				Lookback: &contract.Algorithm_LookbackNum{
-					LookbackNum: uint32(algo.SelfLookbackN),
-				},
+			algoMsg.Lookback = &contract.Algorithm_LookbackNum{
+				LookbackNum: uint32(algo.SelfLookbackN),
+			}
+		}
+
+		if algo.SelfLookbackGapTd > 0 {
+			algoMsg.LookbackGap = &contract.Algorithm_LookbackGapTimeDelta{
+				LookbackGapTimeDelta: uint64(algo.SelfLookbackGapTd.Nanoseconds()),
+			}
+		} else {
+			algoMsg.LookbackGap = &contract.Algorithm_LookbackGapNum{
+				LookbackGapNum: uint32(algo.SelfLookbackGapN),
 			}
 		}
 
@@ -416,10 +415,15 @@ func (p *Processor) Register(ctx context.Context, algorithms []*Algorithm) error
 					ProcessorRuntime: p.runtime,
 				}
 
-				if lookback.N > 0 {
-					depMsg.Lookback = &contract.AlgorithmDependency_LookbackNum{LookbackNum: uint32(lookback.N)}
-				} else if lookback.TD > 0 {
+				if lookback.TD > 0 {
 					depMsg.Lookback = &contract.AlgorithmDependency_LookbackTimeDelta{LookbackTimeDelta: uint64(lookback.TD.Nanoseconds())}
+				} else {
+					depMsg.Lookback = &contract.AlgorithmDependency_LookbackNum{LookbackNum: uint32(lookback.N)}
+				}
+				if lookback.GapTD > 0 {
+					depMsg.LookbackGap = &contract.AlgorithmDependency_LookbackGapTimeDelta{LookbackGapTimeDelta: uint64(lookback.GapTD.Nanoseconds())}
+				} else {
+					depMsg.LookbackGap = &contract.AlgorithmDependency_LookbackGapNum{LookbackGapNum: uint32(lookback.GapN)}
 				}
 				algoMsg.Dependencies = append(algoMsg.Dependencies, depMsg)
 			}
