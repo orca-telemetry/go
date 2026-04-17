@@ -25,8 +25,10 @@ type algorithmRegistry struct {
 }
 
 type lookbackParams struct {
-	N  int
-	TD time.Duration
+	N     int
+	TD    time.Duration
+	GapN  int
+	GapTD time.Duration
 }
 
 func newAlgorithmRegistry() *algorithmRegistry {
