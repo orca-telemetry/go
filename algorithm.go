@@ -62,7 +62,7 @@ type AlgorithmOptions struct {
 	SelfLookbackN     int
 	SelfLookbackTd    time.Duration
 	SelfLookbackGapN  int
-	selfLookbackGapTd time.Duration
+	SelfLookbackGapTd time.Duration
 }
 
 type AlgorithmOption func(*AlgorithmOptions)
@@ -101,7 +101,7 @@ func WithSelfLookbackGapN(n int) AlgorithmOption {
 
 func WithSelfLookbackGapTD(td time.Duration) AlgorithmOption {
 	return func(o *AlgorithmOptions) {
-		o.selfLookbackGapTd = td
+		o.SelfLookbackGapTd = td
 	}
 }
 
@@ -155,7 +155,7 @@ func NewAlgorithm(
 		SelfLookbackN:     opts.SelfLookbackN,
 		SelfLookbackTd:    opts.SelfLookbackTd,
 		SelfLookbackGapN:  opts.SelfLookbackGapN,
-		SelfLookbackGapTd: opts.SelfLookbackTd,
+		SelfLookbackGapTd: opts.SelfLookbackGapTd,
 	}
 
 	return algo, nil
