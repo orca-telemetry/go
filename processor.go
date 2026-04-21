@@ -244,6 +244,29 @@ func (p *Processor) executeAlgorithm(
 	// if there are self results pack then in
 	var selfResultsPacked = make([]*DependencyResultRow, len(selfResults))
 	for ii, res := range selfResults {
+		var value Result
+		switch v := res.Result.ResultData.(type) {
+
+		case *contract.Result_SingleValue:
+			value = ValueResult{
+				Value: v.SingleValue,
+			}
+
+		case *contract.Result_FloatValues:
+			vals := make([]float32, len(v.FloatValues.Values))
+
+			copy(vals, v.FloatValues.GetValues())
+
+			value = ArrayResult{
+				Value: vals,
+			}
+
+		case *contract.Result_StructValue:
+			value = StructResult{
+				Value: v.StructValue.AsMap(),
+			}
+		}
+
 		selfResultsPacked[ii] = &DependencyResultRow{
 			Window: Window{
 				TimeFrom: res.Window.GetTimeFrom().AsTime(),
@@ -253,6 +276,7 @@ func (p *Processor) executeAlgorithm(
 				Origin:   res.Window.GetOrigin(),
 				Metadata: res.Window.GetMetadata().AsMap(),
 			},
+			Result: value,
 		}
 	}
 
