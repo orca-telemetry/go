@@ -3,7 +3,7 @@ module github.com/orca-telemetry/go
 go 1.25.3
 
 require (
-	github.com/orca-telemetry/contract v1.4.0
+	github.com/orca-telemetry/contract/go v1.6.0
 	github.com/rs/zerolog v1.34.0
 	github.com/stretchr/testify v1.11.1
 	github.com/testcontainers/testcontainers-go v0.39.0

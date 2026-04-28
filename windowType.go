@@ -11,6 +11,7 @@ var windowNamePattern = regexp.MustCompile(`^[A-Z][a-zA-Z0-9]*$`)
 type MetadataField struct {
 	Name        string
 	Description string
+	Filter      bool
 }
 
 // Validate validates the metadata field

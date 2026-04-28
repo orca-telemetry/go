@@ -425,6 +425,7 @@ func (p *Processor) Register(ctx context.Context, algorithms []*Algorithm) error
 			algoMsg.WindowType.MetadataFields = append(algoMsg.WindowType.MetadataFields, &contract.MetadataField{
 				Name:        field.Name,
 				Description: field.Description,
+				Filter:      field.Filter,
 			})
 		}
 
