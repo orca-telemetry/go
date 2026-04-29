@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"os/signal"
@@ -299,11 +300,15 @@ func (p *Processor) executeAlgorithm(
 func (p *Processor) createErrorResult(execID string, algorithm *contract.Algorithm, err error) *contract.ExecutionResult {
 	log.Error().Err(err).Str("name", algorithm.Name).Msg("Algorithm %s failed")
 
-	errorStruct, _ := structpb.NewStruct(map[string]any{
+	var errorStruct *structpb.Struct
+
+	errorStruct, structErr := structpb.NewStruct(map[string]any{
 		"error": err.Error(),
 	})
-	errorStructPb := contract.Result_StructValue{
-		StructValue: errorStruct,
+
+	if structErr != nil {
+		slog.Error("could not construct the error result")
+		errorStruct = &structpb.Struct{}
 	}
 
 	return &contract.ExecutionResult{
@@ -311,9 +316,9 @@ func (p *Processor) createErrorResult(execID string, algorithm *contract.Algorit
 		AlgorithmResult: &contract.AlgorithmResult{
 			Algorithm: algorithm,
 			Result: &contract.Result{
-				Status:     contract.ResultStatus_RESULT_STATUS_UNHANDLED_FAILED,
-				ResultData: &errorStructPb,
-				Timestamp:  time.Now().Unix(),
+				Status:    contract.ResultStatus_RESULT_STATUS_HANDLED_FAILED,
+				Error:     errorStruct,
+				Timestamp: time.Now().Unix(),
 			},
 		},
 	}
